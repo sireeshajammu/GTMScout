@@ -1,0 +1,23 @@
+# Python
+.env
+backend/.env
+.venv/
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# Node / frontend
+frontend/node_modules/
+frontend/.env
+frontend/.env.local
+frontend/.output/
+frontend/.vercel/
+frontend/.wrangler/
+frontend/dist/
+
+# Vercel
+.vercel
+
+# OS
+.DS_Store
+Thumbs.db
