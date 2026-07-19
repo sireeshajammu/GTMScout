@@ -252,6 +252,17 @@ export async function sendMessage(
   const conv = store.conversations.find((c) => c.id === conversationId);
   if (!conv) throw new Error("Conversation not found");
 
+  // Capture recent conversation context BEFORE appending the new message, so the
+  // backend can accumulate details across turns and answer follow-up questions.
+  const history = conv.messages.slice(-10).map((m) => ({
+    role: m.role,
+    text:
+      m.kind === "report" && m.report
+        ? `[report] ${m.report.verdict} for ${m.report.request.target_country} · ` +
+          `${m.report.request.business_type} (${m.report.request.budget} ${m.report.request.currency})`
+        : m.text ?? "",
+  }));
+
   // Append the user message + set the title from the first message.
   const userMsg = makeUserMessage(text);
   conv.messages = [...conv.messages, userMsg];
@@ -294,7 +305,7 @@ export async function sendMessage(
     const resp = await fetch(`${API_BASE}/api/research`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, history }),
     });
     if (!resp.ok) throw new Error(`Backend error ${resp.status}`);
     assistantMsg = (await resp.json()) as Message;

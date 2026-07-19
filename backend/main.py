@@ -5,7 +5,7 @@ Stateless service: one real job — turn a chat message into an assistant Messag
 live client-side in the frontend, which keeps this backend serverless-friendly.
 """
 import os
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -30,8 +30,14 @@ app.add_middleware(
 )
 
 
+class HistoryItem(BaseModel):
+    role: str
+    text: str = ""
+
+
 class ResearchBody(BaseModel):
     text: str
+    history: Optional[List[HistoryItem]] = None
     home_country: Optional[str] = None
     budget: Optional[float] = None
     currency: Optional[str] = None
@@ -55,8 +61,10 @@ def research(body: ResearchBody):
         return {"id": "err", "role": "assistant", "kind": "text",
                 "text": "Please enter a question about a market.", "created_at": ""}
 
+    history = [h.model_dump() for h in body.history] if body.history else None
     msg = run_research(
         text=body.text.strip(),
+        history=history,
         home_country=body.home_country,
         budget=body.budget,
         currency=body.currency,

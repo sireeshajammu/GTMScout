@@ -1,57 +1,91 @@
 from agents.base_agent import Agent
-from typing import Dict
-import json
+from typing import Dict, List, Optional
 
 
 class IntakeAgent(Agent):
     """
-    Parses a free-text chat message into a structured market-research request,
-    or decides the message needs clarification. This is what makes the app feel
-    conversational rather than form-driven.
+    Conversational router. Reads the whole recent conversation (not just the last
+    message) and decides one of two things:
+      - intent "new_report": we now have enough to run a market-entry analysis, so
+        it returns the accumulated {target_country, business_type, home_country,
+        budget, currency}.
+      - intent "reply": the message is a greeting, a follow-up question about the
+        previous report, or is still missing a country/business — so it returns a
+        short conversational reply instead.
+
+    Reading the transcript is what makes the app feel like a chat rather than a
+    one-shot form: "software development" + an earlier "India" now combine.
     """
 
     def __init__(self):
-        system_prompt = """You are the intake router for a market-entry research assistant.
-Given a user's chat message, decide whether it is a concrete market-entry question
-that names (or clearly implies) a TARGET COUNTRY and a BUSINESS TYPE.
+        system_prompt = """You are the conversational router for a market-entry research assistant.
+You read the ENTIRE recent conversation plus the newest user message, then respond with JSON.
 
-Return ONLY a JSON object with this exact shape:
+Decide the intent:
+- "new_report": the conversation now identifies BOTH a target country and a business type.
+  Accumulate details across ALL turns (a country mentioned earlier + a business type mentioned
+  later together count). Carry over the budget/home country/currency from earlier turns if the
+  newest message doesn't restate them.
+- "reply": use this when the message is a greeting, OR is a follow-up question about the previous
+  report (e.g. "why LinkedIn?", "what are the risks?"), OR still lacks a country or business type.
+  In these cases write a helpful, concise "reply" (you may answer follow-up questions using the
+  details already shown in the conversation).
+
+Return ONLY this JSON:
 {
-  "is_market_question": true | false,
+  "intent": "new_report" | "reply",
   "request": {
-    "target_country": "<country name or empty string>",
-    "business_type": "<business type or empty string>",
-    "home_country": "<home country if stated, else 'United States'>",
-    "budget": <number, default 20000 if not stated>,
+    "target_country": "<country or empty>",
+    "business_type": "<business type or empty>",
+    "home_country": "<home country if known, else 'United States'>",
+    "budget": <number, default 20000>,
     "currency": "<3-letter code, default 'USD'>"
   },
-  "clarification": "<if is_market_question is false, a short friendly question asking for the missing pieces; else empty string>"
+  "reply": "<text to show the user when intent is 'reply'; else empty string>"
 }
 
 Rules:
-- A message is a market question only if you can identify BOTH a target country and a business type.
 - Normalize country names to common English (e.g. 'brasil' -> 'Brazil').
 - Parse budgets like '$15k', '20,000 USD', '30k euros' into a number + currency.
-- If it's small talk, a greeting, or missing country/business, set is_market_question false and ask for the missing pieces in clarification.
+- If the user asks to COMPARE two or more countries, pick the FIRST country mentioned for the
+  report (we analyze one market per brief) — set intent "new_report" for that country if a
+  business type is known; otherwise set intent "reply" and ask which single country to start with.
+- Only set intent "new_report" when target_country AND business_type are both non-empty.
 """
         super().__init__(name="IntakeAgent", system_prompt=system_prompt)
 
-    def execute(self, text: str) -> Dict:
-        result = self.call_json(
-            f'User message: "{text}"\n\nReturn the JSON object.',
-            max_tokens=300,
+    def execute(self, text: str, history: Optional[List[Dict]] = None) -> Dict:
+        transcript = self._format_history(history)
+        prompt = (
+            (f"Conversation so far:\n{transcript}\n\n" if transcript else "")
+            + f'Newest user message: "{text}"\n\nReturn the JSON object.'
         )
+        result = self.call_json(prompt, max_tokens=400)
+
         if not result.get("success"):
-            # On parse failure, degrade gracefully to asking for details.
             return {
-                "is_market_question": False,
+                "intent": "reply",
                 "request": {},
-                "clarification": "Could you share the target country, business type, and budget? "
-                "For example: \"Consumer app in Brazil, $15k USD.\"",
+                "reply": "Could you share the target country, business type, and budget? "
+                'For example: "Consumer app in Brazil, $15k USD."',
                 "_error": result.get("error"),
             }
+
         data = result["data"]
-        data.setdefault("is_market_question", False)
+        data.setdefault("intent", "reply")
         data.setdefault("request", {})
-        data.setdefault("clarification", "")
+        data.setdefault("reply", "")
         return data
+
+    @staticmethod
+    def _format_history(history: Optional[List[Dict]]) -> str:
+        if not history:
+            return ""
+        lines = []
+        for m in history[-10:]:
+            role = m.get("role", "user")
+            speaker = "User" if role == "user" else "Assistant"
+            txt = (m.get("text") or "").strip()
+            if txt:
+                lines.append(f"{speaker}: {txt}")
+        return "\n".join(lines)

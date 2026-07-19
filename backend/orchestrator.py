@@ -6,7 +6,7 @@ aggregates token cost across all agents, and attaches structured citations.
 """
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from agents.intake_agent import IntakeAgent
 from agents.data_agent import DataAgent
@@ -34,18 +34,24 @@ def _report_message(report: Dict) -> Dict:
 
 def run_research(
     text: str,
+    history: Optional[List[Dict]] = None,
     home_country: Optional[str] = None,
     budget: Optional[float] = None,
     currency: Optional[str] = None,
 ) -> Dict:
-    """Main entry point. Returns an assistant Message dict (text or report)."""
+    """Main entry point. Returns an assistant Message dict (text or report).
+
+    `history` is the recent conversation ([{role, text}, ...]) so the intake agent
+    can accumulate context across turns and answer follow-up questions.
+    """
 
     intake = IntakeAgent()
-    parsed = intake.execute(text)
+    parsed = intake.execute(text, history=history)
 
-    if not parsed.get("is_market_question"):
+    # Not enough info yet, a greeting, or a follow-up question -> conversational reply.
+    if parsed.get("intent") != "new_report":
         msg = _text_message(
-            parsed.get("clarification")
+            parsed.get("reply")
             or "Tell me the target country, business type, and budget and I'll run the analysis."
         )
         # attach the tiny intake cost so usage still tracks
@@ -61,6 +67,12 @@ def run_research(
         "budget": float(budget or req.get("budget") or 20000),
         "currency": currency or req.get("currency") or "USD",
     }
+
+    # Safety net: if the router mislabeled intent without a country, ask instead of erroring.
+    if not request["target_country"].strip():
+        msg = _text_message("Which country should I analyze? Tell me the market and business type.")
+        msg["_cost"] = _cost_block([intake])
+        return msg
 
     # --- Agent pipeline ---
     data_agent = DataAgent()
