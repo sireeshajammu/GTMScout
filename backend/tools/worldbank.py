@@ -8,21 +8,26 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
+# All ~249 countries, precomputed offline from ISO-3166 (see scripts/generate_country_codes.py).
+# Loaded once at import — a single ~19KB module, no runtime API fetch, no cold-start cost.
+from country_codes_data import COUNTRY_INDEX
+
 WORLDBANK_API = "https://api.worldbank.org/v2/country"
 REQUEST_TIMEOUT = 10  # seconds per indicator
 
-# Name -> World Bank ISO3 code
-COUNTRY_CODES = {
-    "japan": "JPN", "usa": "USA", "united states": "USA", "us": "USA",
-    "brazil": "BRA", "brasil": "BRA", "germany": "DEU", "deutschland": "DEU",
-    "india": "IND", "china": "CHN", "uk": "GBR", "united kingdom": "GBR",
-    "france": "FRA", "canada": "CAN", "mexico": "MEX", "australia": "AUS",
-    "indonesia": "IDN", "nigeria": "NGA", "south korea": "KOR", "korea": "KOR",
-    "italy": "ITA", "spain": "ESP", "netherlands": "NLD", "sweden": "SWE",
-    "singapore": "SGP", "uae": "ARE", "united arab emirates": "ARE",
-    "saudi arabia": "SAU", "south africa": "ZAF", "argentina": "ARG",
-    "vietnam": "VNM", "thailand": "THA", "philippines": "PHL", "poland": "POL",
-    "turkey": "TUR", "egypt": "EGY", "colombia": "COL", "chile": "CHL",
+# Colloquial shorthands the official ISO names don't cover. These win over COUNTRY_INDEX.
+COUNTRY_ALIASES = {
+    "usa": "USA", "us": "USA", "u.s.": "USA", "u.s.a.": "USA", "america": "USA",
+    "uk": "GBR", "u.k.": "GBR", "britain": "GBR", "great britain": "GBR", "england": "GBR",
+    "uae": "ARE", "emirates": "ARE",
+    "russia": "RUS", "south korea": "KOR", "north korea": "PRK", "korea": "KOR",
+    "turkey": "TUR", "vietnam": "VNM", "iran": "IRN", "syria": "SYR", "laos": "LAO",
+    "brunei": "BRN", "bolivia": "BOL", "venezuela": "VEN", "tanzania": "TZA",
+    "moldova": "MDA", "czech republic": "CZE", "czechia": "CZE", "ivory coast": "CIV",
+    "cape verde": "CPV", "swaziland": "SWZ", "eswatini": "SWZ", "burma": "MMR", "myanmar": "MMR",
+    "drc": "COD", "dr congo": "COD", "democratic republic of congo": "COD", "congo": "COG",
+    "taiwan": "TWN", "palestine": "PSE", "hong kong": "HKG", "macau": "MAC", "macao": "MAC",
+    "brasil": "BRA", "deutschland": "DEU",
 }
 
 INDICATORS = {
@@ -48,7 +53,10 @@ FALLBACK = {
 
 
 def get_country_code(country_name: str) -> Optional[str]:
-    return COUNTRY_CODES.get(country_name.lower().strip())
+    """Resolve a country name / ISO-2 / ISO-3 to a World Bank ISO-3 code.
+    Curated aliases first (colloquial shorthands), then the full ISO-3166 index."""
+    n = (country_name or "").lower().strip()
+    return COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n)
 
 
 def _fetch_indicator(country_code: str, indicator_code: str) -> Dict:
