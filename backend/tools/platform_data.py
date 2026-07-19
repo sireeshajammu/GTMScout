@@ -100,5 +100,5 @@ def get_platform_interest(country: str, business_type: str, top_n: int = 6) -> D
         "business_type": business_type,
         "category": category,
         "comparison": comparison,
-        "source": "GTMScout interest model (relative signal, 0-100)",
+        "source": "GTMScout heuristic interest model (hand-tuned weights, relative signal 0-100 — not learned)",
     }

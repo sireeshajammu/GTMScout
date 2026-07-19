@@ -61,6 +61,6 @@ Return ONLY JSON:
             "platform_recommendations": recs,
             "brief": f"Ranked {len(recs)} platforms for {business_type} in {country} by relative interest.",
             "citations": [
-                {"source": "GTMScout interest model", "detail": interest.get("source", ""), "url": None},
+                {"source": "GTMScout heuristic interest model", "detail": interest.get("source", ""), "url": None},
             ],
         }

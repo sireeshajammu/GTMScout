@@ -24,6 +24,7 @@ from agents.critic_agent import CriticAgent
 from agents.deepdive_agent import DeepDiveAgent
 from agents.comparison_agent import ComparisonAgent
 from agents.ranking_agent import RankingAgent
+from contracts import validate_report
 from config import usd_cost
 
 # --- agent-loop tuning ---
@@ -303,6 +304,12 @@ def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
             "research": _research_brief(research_out),
         },
     }
+    # Contract boundary: validate the assembled brief. Non-fatal — log and still return
+    # (we never want a schema nit to drop a real answer in production).
+    try:
+        validate_report(report)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: report failed contract validation: {e}")
     return _report_message(report)
 
 
