@@ -49,9 +49,14 @@ Return ONLY this JSON:
 Rules:
 - Normalize country names to common English (e.g. 'brasil' -> 'Brazil').
 - Parse budgets like '$15k', '20,000 USD', '30k euros' into a number + currency.
-- If the user asks to COMPARE two or more countries, pick the FIRST country mentioned for the
-  report (we analyze one market per brief) — set intent "new_report" for that country if a
-  business type is known; otherwise set intent "reply" and ask which single country to start with.
+- PIVOT (important): if the newest message asks to analyze ONE (possibly different) country —
+  e.g. "now do Mexico", "what about France?", "same analysis for Vietnam", "try India instead" —
+  set intent "new_report" for THAT country and INHERIT the business_type, budget, home_country and
+  currency from the most recent report in the conversation. A pivot to a new country is NOT a
+  comparison — never ask the user to choose between the old country and the new one.
+- COMPARE: only when the NEWEST message itself names two or more countries to compare AND none is
+  singled out (e.g. "compare Brazil vs India"), set intent "reply" and ask which single country to
+  start with (we analyze one market per brief).
 - Only set intent "new_report" when target_country AND business_type are both non-empty.
 """
         super().__init__(name="IntakeAgent", system_prompt=system_prompt)
