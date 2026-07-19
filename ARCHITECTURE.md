@@ -1,95 +1,100 @@
 # GTMScout — Architecture (as built)
 
-> An agentic AI application. A user asks, in plain English, about expanding a business into a
-> foreign market; a team of specialist agents produces a grounded market-entry brief — a
-> **GO / PROCEED WITH CAUTION / NOT YET** verdict, platform strategy, budget allocation, risks,
-> next steps, and citations — rendered inside a chat interface.
+> An agentic market-entry research assistant. A user asks, in plain English, whether/how to
+> expand a business into a country; a **hand-rolled agent loop** plans, calls tools in parallel,
+> synthesizes a verdict, **critiques and revises itself**, and returns a grounded, cited brief.
 
 ---
 
-## 1. High-level shape
+## 1. The agent loop (the core)
+
+`backend/orchestrator.py` is a **hand-rolled, graph-shaped state machine** — not a linear
+pipeline. For a market question the flow is:
 
 ```
-Frontend (React · TanStack Start)                Backend (FastAPI · Python, stateless)
-─────────────────────────────────────           ──────────────────────────────────────
-Chat UI, sidebar history, profile,     POST      Orchestrator
-token-usage, light/dark theme slider  ──────►      IntakeAgent   (free text → request | clarify)
-                                     /api/research  DataAgent     (World Bank + fallback)
-Conversations + history + profile      ◄──────      PlatformAgent (interest model + LLM rationale)
-persist in localStorage (no DB)         Message      StrategyAgent (verdict, budget, risks, steps)
-                                       (Report)      CriticAgent   (verify claims, adjust confidence)
-                                                   OpenAI gpt-4o-mini
+IntakeAgent ─ routes intent ─┬─ reply / refuse / clarify        (fast, no pipeline)
+                             ├─ comparison  (from prior reports)
+                             ├─ ranking     (score N markets)
+                             └─ new_report ▼
+
+   PlannerAgent ─► gather (PARALLEL) ─► StrategyAgent ─► CriticAgent ──┐
+                    DataAgent ∥                              ▲          │ conditional edge:
+                    ResearchAgent ∥                          │          │ unsupported claims
+                    PlatformAgent                            └─ replan ─┘ OR confidence < 70
+                         │                                   (re-run Strategy with the
+                    (RunState: plan +                         criticism; gather more evidence
+                     observations +                           if research was skipped)
+                     evidence + log)                              │
+                                                             DeepDiveAgent ─► assemble Report
 ```
 
-Two independent Vercel deployments (one repo): **backend** (Python serverless) and **frontend**
-(TanStack Start). They connect via `VITE_API_BASE` + CORS.
+- **plan → act → observe → decide.** The Planner decides which tools to run; the Critic is the
+  "observe"; the conditional edge back to Strategy is "decide-what's-next."
+- **`RunState`** (a dataclass) is the agent memory that flows through the loop: the plan, each
+  tool's observations, accumulated evidence, and a `reasoning_log` (surfaced in the UI's
+  "Agent reasoning" panel and in the `Report`).
+- **Bounded**, not open-ended: max 2 Strategy attempts. This trades some adaptivity for
+  predictable latency/cost and no infinite loops.
 
-## 2. Why stateless + client-side state
-The backend does exactly one thing: `message text → assistant Message`. Conversation list,
-message history, and the user profile (including cumulative token usage) live in the browser's
-`localStorage`, surfaced through the frontend's single data module `src/services/api.ts`.
+**Why hand-rolled, not LangGraph:** the graph is small and I wanted to explain every transition
+and keep serverless cold-starts lean (no `langchain-core` weight). The nodes/edges map 1:1 to a
+`StateGraph`, so porting later is contained. (See README → Design decisions.)
 
-- No database, no session store → trivial to run on serverless (no cold-start DB, no migrations).
-- The same `api.ts` runs on **mock data** (no backend) or the **real backend** via one env flag,
-  so the UI is always demoable.
+## 2. Agents (each = a distinct reasoning domain + explicit contract)
 
-## 3. The agent pipeline (`backend/orchestrator.py`)
-1. **IntakeAgent** — parses the chat message into `{target_country, business_type, home_country,
-   budget, currency}` or returns a clarifying question if country/business is missing.
-2. **DataAgent** — pulls World Bank indicators (population, GDP/capita, internet %, mobile subs);
-   falls back to curated recent figures if the API is slow/unreachable. Emits structured
-   `market_data` + a citation.
-3. **PlatformAgent** — scores platforms for the country + business category
-   (`tools/platform_data.py`), and the LLM writes a specific rationale per platform. Returns a
-   ranked `platform_recommendations` list.
-4. **StrategyAgent** — synthesizes verdict, confidence, executive summary, budget allocation
-   (normalized to sum to the budget), risks, and next steps. Structured JSON.
-5. **CriticAgent** — reviews the brief against the data, produces `verification.flags`, and
-   returns a confidence delta (self-correction / grounding check).
+| Agent | Job | Output contract (`contracts.py`) |
+|-------|-----|----------------------------------|
+| Intake | route intent, parse country/business/budget, refuse harmful | — |
+| Planner | choose tools + what runs in parallel | plan dict |
+| Data | World Bank macro data (+ fallback) | `DataAgentOut` |
+| Research | Tavily web search + RAG cache | `ResearchAgentOut` |
+| Platform | rank platforms (heuristic model + LLM rationale) | `PlatformAgentOut` |
+| Strategy | verdict, budget, risks, next steps | `StrategyAgentOut` |
+| Critic | verify claims vs data, adjust confidence | `CriticAgentOut` |
+| DeepDive | competitors, unit economics, regulatory, GTM timeline | `DeepDiveAgentOut` |
+| Comparison / Ranking | side-by-side / multi-market rank | — |
 
-The orchestrator aggregates token usage + USD cost across all five agents and assembles the
-final `Report`.
+Every agent extends `base_agent.Agent` (OpenAI `gpt-4o-mini`, retries, token+USD tracking,
+JSON-mode). The orchestrator validates the assembled `Report` against the pydantic contract at
+the boundary (non-fatal).
 
-## 4. Tools (`backend/tools/`)
-- `worldbank.py` — live World Bank API (concurrent requests, per-indicator timeout) with a
-  curated fallback so a run never hard-fails.
-- `platform_data.py` — lean, category-weighted platform-interest model (0–100). Replaces the
-  original `pytrends` tool on the deployed path — `pytrends` drags in `pandas` (heavy cold
-  starts) and rate-limits constantly, which is fatal on serverless. `web_search.py` (the original
-  pytrends implementation) is kept for reference/local use.
-- `calculator.py` — deterministic budget/growth/comparison math.
+## 3. Tools (`backend/tools/`) — with deliberate failure handling
+- **`worldbank.py`** — live World Bank API, **per-indicator resilient** (each indicator retries
+  independently; only the ones that fail use curated fallback). Country resolution is
+  data-driven: a precomputed ISO-3166 index (`country_codes_data.py`, 249 countries) + alias &
+  city maps, so there is no runtime country-list fetch.
+- **`web_research.py`** — Tavily web search; returns nothing gracefully (no key / no results).
+- **`platform_data.py`** — a **transparent heuristic** interest model (hand-tuned category
+  weights, *not* learned). Replaced `pytrends` (kept in `web_search.py` for reference) because
+  pandas bloats serverless cold starts.
+- **`vector_store.py`** — pgvector RAG cache (embeds findings, HNSW index); no-ops without
+  `DATABASE_URL`.
 
-## 5. API contract
-**`POST /api/research`**
-```json
-{ "text": "Should my fast-fashion brand expand into Japan with a $20k budget?",
-  "home_country": null, "budget": null, "currency": null }
-```
-`home_country` / `budget` / `currency` are optional overrides; if null they're parsed from `text`.
+## 4. Safety & validation
+- `safety.py` — a **deterministic gate that runs before any LLM call** and refuses clearly
+  illegal/harmful businesses; the Intake agent adds a semantic `refuse` intent. Jurisdiction
+  legality (e.g. cannabis in Singapore) is enforced in the Strategy/Critic prompts → NOT YET.
+- Input validation in the orchestrator: budget floor/ceiling, required business type, ambiguous
+  country ("Congo → which one?"), major-city → country.
 
-**Returns a `Message`:**
-- `{ "kind": "text", "text": "...clarifying question..." }` — when the message isn't a complete
-  market question, or a data/strategy step fails gracefully, or
-- `{ "kind": "report", "report": Report }` — the full brief.
+## 5. State model (why no server DB for chat)
+The backend is **stateless per request**. Conversations, history, and profile/token-usage live
+**client-side in `localStorage`** (frontend `src/services/api.ts`), which is ideal for serverless.
+The only server-side persistence is the **optional** pgvector research cache. The frontend sends
+recent `history` (and prior `reports`) with each message so the backend can accumulate context,
+answer follow-ups, and build comparisons without re-analysis.
 
-**`Report`** (mirrors `frontend/src/services/types.ts`): `id, request, verdict, confidence,
-executive_summary, market_data, platform_recommendations[], budget_allocation[], risks[],
-next_steps[], citations[], cost{total_tokens_in,total_tokens_out,usd,per_agent[]},
-verification{checked,flags[],note}, agent_briefs{data,platform,strategy}`.
+## 6. Frontend
+React + TanStack Start. Chat UI with a sidebar (history + profile/token usage), a light/dark
+theme slider, and inline rich cards: `BriefCard` (report + Agent-reasoning trace),
+`ComparisonCard`, `RankingCard`. `src/services/types.ts` mirrors the backend contracts.
 
-**`GET /api/health`** → `{ status, model, openai_key_present }`.
+## 7. Deployment
+Two Vercel projects from one repo: **backend** (Python 3.12, `api/index.py`, `maxDuration 60s`)
+and **frontend** (TanStack Start, `NITRO_PRESET=vercel`). Same repo, connected by `VITE_API_BASE`
++ CORS. See README → Deploy.
 
-## 6. Frontend integration points
-- `src/services/api.ts` — conversations/profile CRUD (localStorage) in both modes; `sendMessage`
-  posts to `/api/research` in real mode and animates an optimistic agent stepper while awaiting
-  the single response. Token usage updates from `report.cost` after each run.
-- `src/services/types.ts` — the shared shapes; keep in sync with the backend Report.
-- Mode switch: `VITE_API_BASE` set → real backend; empty → mocks (`VITE_USE_MOCKS` can force either).
-
-## 7. Hosting
-- **Backend**: Vercel project, Root Directory `backend`, Python 3.12 runtime, `maxDuration 60s`
-  (`vercel.json`). Env: `OPENAI_API_KEY`, `FRONTEND_ORIGIN`.
-- **Frontend**: Vercel project, Root Directory `frontend`, `NITRO_PRESET=vercel` so the TanStack
-  Start/Nitro build emits Vercel Build Output. Env: `VITE_API_BASE`, `VITE_USE_MOCKS=false`.
-
-See [README.md](README.md) for step-by-step deploy instructions.
+## 8. Evaluation
+`backend/evals/` — 10 cases with deterministic "correct" definitions + a harness that prints
+pass/fail and metrics (pass rate, tool-call success, self-correction rate, latency, cost). See
+`evals/RESULTS.md`.

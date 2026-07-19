@@ -1,132 +1,151 @@
-# GTMScout — AI Market-Entry Advisor
+# GTMScout — an agentic market-entry research assistant
 
-GTMScout is a conversational, multi-agent AI app. You ask a plain-English question like
-*"Should my fast-fashion brand expand into Japan with a $20k budget?"* and a team of
-specialist agents researches the market and replies with a full **market-entry brief**:
-a verdict (GO / PROCEED WITH CAUTION / NOT YET), platform strategy, budget allocation,
-risks, next steps, citations, and token cost — all inside a ChatGPT/Claude-style chat UI.
+Ask a plain-English question — *"Should a fintech expand into Germany with a $30k budget?"* — and
+GTMScout runs a **real agent loop**: it plans an approach, calls tools (in parallel), synthesizes a
+verdict, **critiques and revises its own answer**, and returns a grounded, cited brief. The task
+genuinely needs multiple steps and tools, so a single model call isn't enough.
 
-```
-┌────────────────────────────────────────────┐        ┌───────────────────────────────┐
-│  Frontend  (React · TanStack Start)          │        │  Backend  (FastAPI · Python)   │
-│  • chat UI, sidebar history, profile,        │  POST  │  Orchestrator                  │
-│    token usage, light/dark theme slider      │ ─────► │   Intake → Data → Platform     │
-│  • conversations + history + profile persist │ /api/  │        → Strategy → Critic      │
-│    in localStorage (no DB needed)            │research│  OpenAI gpt-4o-mini            │
-│  • VITE_API_BASE points at the backend       │ ◄───── │  World Bank API · interest     │
-│                                              │  JSON  │  model · budget calculator     │
-└────────────────────────────────────────────┘ (Report)└───────────────────────────────┘
-```
-
-The backend is **stateless** — its one job is to turn a message into a report. All
-conversation/history/profile state lives client-side, which keeps hosting simple.
+**Live demo:** app → https://gtm-scout.vercel.app · API health → https://gtm-scout-api.vercel.app/api/health
+**Model:** OpenAI `gpt-4o-mini` (cheap; ~$0.002 per full brief).
 
 ---
 
-## Repository layout
+## What it does (the agent loop)
+
+For a market question the flow is **plan → act → observe → decide-what's-next**:
 
 ```
-market-research-agent/            (GTMScout)
-├── backend/                      Python FastAPI service (deploy as Vercel project #1)
-│   ├── api/index.py              Vercel serverless entry (exposes the ASGI app)
-│   ├── main.py                   FastAPI app: /api/research, /api/health
-│   ├── orchestrator.py           Chains the agents → assembles the Report
-│   ├── agents/                   base, intake, data, platform, strategy, critic
-│   ├── tools/                    worldbank (live+fallback), platform_data, calculator
-│   │                             (web_search.py = original pytrends tool, kept for reference)
-│   ├── config.py                 model + pricing config
-│   ├── requirements.txt
-│   ├── vercel.json               maxDuration + routing
-│   ├── .env.example              → copy to .env with your OPENAI_API_KEY
-│   └── tests/                    test_pipeline.py, test_worldbank.py, test_calculator.py
-├── frontend/                     TanStack Start app from Lovable (deploy as Vercel project #2)
-│   ├── src/services/api.ts       the ONLY data layer (mock ⇄ real backend switch)
-│   ├── src/services/types.ts     shared TypeScript shapes (mirror of the backend Report)
-│   └── .env.example              → VITE_API_BASE
-├── ARCHITECTURE.md               design + rationale
-└── README.md                     you are here
+Intake (route/parse/refuse) → Planner (pick tools) → gather in PARALLEL
+   [DataAgent · ResearchAgent · PlatformAgent]  → StrategyAgent → CriticAgent
+        │                                              ▲             │  conditional edge:
+   RunState carries plan + observations +              └── replan ───┘  unsupported claims
+   evidence + reasoning-log through the loop           (re-run Strategy)  OR confidence < 70
+        │                                                    │
+                                                       DeepDiveAgent → assemble + validate Report
 ```
+
+It also routes non-report intents: **clarify** (under-specified), **refuse** (illegal business),
+**comparison** (side-by-side of analyzed markets), and **ranking** (score several markets). Full
+design in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+## How it maps to the assignment's core requirements
+
+| Requirement | Where |
+|---|---|
+| 1. Real agent loop (plan→act→observe→decide, multi-step) | `orchestrator.py` — planner + parallel gather + reflection/replan edge (`RunState`) |
+| 2. ≥2–3 tools, one can fail | World Bank (fails→fallback), Tavily web search (returns nothing→graceful), heuristic platform model, pgvector RAG |
+| 3. Error handling & recovery | LLM retries, WB per-indicator retry+fallback, graceful tool degradation, Strategy re-planning |
+| 4. State across steps | `RunState` (plan/observations/evidence/log) + client-side conversation memory + RAG cache |
+| 5. Structured, grounded output + citations | pydantic-validated `Report` (`contracts.py`), real World Bank + Tavily source URLs |
+| 6. Minimal evaluation (5–10 cases, defined correctness, pass/fail) | `backend/evals/` → `run_eval.py`, `eval_cases.py`, `RESULTS.md` (10/10 live) |
+| 7. README | this file |
+
+**Stretch goals done:** self-correction/reflection, ambiguity handling (clarifying questions),
+guardrails (safety refusal + jurisdiction legality), cost/latency awareness (tracking + a
+parallelization optimization), evaluation harness with metrics, and a planner/executor
+multi-agent state-graph architecture.
 
 ---
 
 ## Run it locally
 
-### 1. Backend
+**Backend**
 ```bash
 cd backend
-python -m venv .venv
-# Windows:  .venv\Scripts\activate       macOS/Linux:  source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env          # then edit .env and add your OPENAI_API_KEY
-python run_local.py           # serves http://localhost:8000
+cp .env.example .env        # add OPENAI_API_KEY (TAVILY_API_KEY & DATABASE_URL optional)
+python run_local.py         # http://localhost:8000  → /api/health
 ```
-Sanity check: open http://localhost:8000/api/health → `{"status":"ok", ...}`.
-Optional: `python -m tests.test_pipeline --live` runs the full pipeline once.
 
-### 2. Frontend
+**Evaluation** (the deliverable — runs the 10 cases, prints pass/fail + metrics)
 ```bash
-cd frontend
-npm install
-# point the UI at the backend:
-echo "VITE_API_BASE=http://localhost:8000" > .env.local
-echo "VITE_USE_MOCKS=false"                >> .env.local
-npm run dev                   # serves http://localhost:8080
+# against local backend (above), or a deployed one:
+GTMSCOUT_API_BASE=http://localhost:8000 python -m evals.run_eval
 ```
-> Leave `.env.local` out entirely and the UI runs on built-in **mock data** (no backend
-> needed) — handy for frontend-only work.
+
+**Tests** (offline, no keys): `python -m tests.test_units` · `python -m tests.test_contracts`
+
+**Frontend**
+```bash
+cd frontend && npm install
+printf "VITE_API_BASE=http://localhost:8000\nVITE_USE_MOCKS=false\n" > .env.local
+npm run dev                 # http://localhost:8080
+```
+> With no `.env.local`, the UI runs on built-in **mock data** (no backend needed).
+
+**Deploy:** two Vercel projects (backend + frontend) from one repo — full click-by-click in
+**[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ---
 
-## Deploy to Vercel (two projects, one repo)
+## Key design decisions & tradeoffs
 
-Push this repo to GitHub, then create **two** Vercel projects from it.
+- **Hand-rolled state machine, not LangGraph.** The graph is small; I wanted to explain every
+  transition and keep serverless cold-starts lean (no `langchain-core`). The nodes/edges map 1:1
+  to a `StateGraph`, so porting is contained. Tradeoff: I reimplement a little plumbing LangGraph
+  gives for free.
+- **Agents, not functions.** Each agent owns a distinct reasoning domain with an explicit pydantic
+  I/O contract (`contracts.py`), so they're independently testable/replaceable and individually
+  cost-tracked. Tradeoff: more LLM calls (higher latency/cost) than one mega-prompt.
+- **Bounded reflection (max 2 Strategy passes).** Real self-correction without infinite loops.
+  Tradeoff: caps how much it can recover in one turn.
+- **Dropped `pytrends` for a transparent heuristic platform model.** `pytrends` pulls in `pandas`
+  (heavy serverless cold starts) and rate-limits constantly. The heuristic is honest (hand-tuned
+  weights, *not* learned) and the LLM reasons on top. Kept `web_search.py` for reference.
+- **Stateless backend + client-side chat state.** Conversations/history/profile live in
+  `localStorage`; no server DB for chat → trivial serverless hosting. Only the RAG cache is
+  server-side (and optional).
+- **Precomputed country data, not a runtime fetch.** ~249 countries are bundled offline
+  (`country_codes_data.py`, generated from ISO-3166) → no runtime World Bank list call, no
+  cold-start cost. Static data belongs at build time.
+- **pgvector over a dedicated vector DB.** At this corpus size, vector search is just an index on
+  Postgres I already have — no extra vendor/sync surface. Behind an interface, so swapping to
+  Qdrant/Pinecone at scale is contained.
+- **One optimization, measured:** the three independent gather tools run in **parallel**
+  (`ThreadPoolExecutor`), and cold-start latency was cut by dropping `pandas`.
 
-### Project #1 — Backend (Python)
-1. **New Project** → import the repo → set **Root Directory = `backend`**.
-2. Framework preset: **Other** (Vercel auto-detects the Python function in `api/`).
-3. **Environment Variables**:
-   - `OPENAI_API_KEY` = your key
-   - `FRONTEND_ORIGIN` = your frontend URL once you have it (e.g. `https://gtmscout.vercel.app`) — or `*` to start.
-4. Deploy. Note the URL, e.g. `https://gtmscout-api.vercel.app`.
-   Verify: `https://gtmscout-api.vercel.app/api/health`.
+## Known limitations (honest)
 
-> Vercel runs Python **3.12** for functions (wheels for all deps exist there — no build step needed).
-> `vercel.json` already sets `maxDuration: 60s`, comfortably above a normal ~10–25s run.
+- **Streaming is faked.** The UI's "Agent reasoning" stepper is an *optimistic client-side*
+  animation; the backend returns a single POST, it does not stream tokens/steps. Real SSE is TODO.
+- **Indirect prompt injection is unhandled.** `ResearchAgent` feeds raw Tavily web content to the
+  LLM; a malicious page could try to inject instructions. The safety gate only screens *user*
+  input, not *tool* output.
+- **The Critic is strict.** In eval, it revised **3/3** report cases — it almost always triggers
+  one revision, adding an LLM call. The `CONFIDENCE_FLOOR = 70` should be calibrated against a
+  labelled quality set so it revises when it *helps*, not reflexively.
+- **The platform model is a heuristic, not learned** — a relative signal, not empirical demand.
+- **Eval checks structure/routing/directional verdicts, not prose factuality.** Judging the
+  free-text analysis would need an LLM-as-judge or human rubric.
+- **Guardrail on insufficient evidence is soft** — sparse-data markets get a low-confidence NOT YET
+  with flags rather than an explicit "I don't have enough data to answer."
+- **Country matching isn't fuzzy** — "Phillipines" (misspelled) still fails.
 
-### Project #2 — Frontend (TanStack Start)
-1. **New Project** → import the same repo → set **Root Directory = `frontend`**.
-2. Framework preset: **Vite** (or "Other" — the build command is `npm run build`).
-3. **Environment Variables**:
-   - `VITE_API_BASE` = the backend URL from step #1 (e.g. `https://gtmscout-api.vercel.app`)
-   - `VITE_USE_MOCKS` = `false`
-   - `NITRO_PRESET` = `vercel`  ← ensures the server build targets Vercel's Build Output API
-4. Deploy. Open the URL and ask a question.
-5. Go back to the **backend** project and set `FRONTEND_ORIGIN` to this frontend URL, then redeploy
-   the backend (tightens CORS from `*` to just your site).
+## Scope & time-box (where I stopped, and why)
 
-That's it — the frontend calls `${VITE_API_BASE}/api/research`, CORS is handled, and history/profile
-persist in the browser.
+The brief suggests ~4–6 hours and prefers "a smaller thing done well." I went well beyond that — I
+treated this as a learning project and kept iterating, adding depth on several stretch goals (RAG,
+comparison/ranking modes, a full chat UI, deployment, safety hardening). A tight 4–6h version would
+be: **the agent loop + 3 tools + error handling + the eval harness + this README** — the core
+requirements. Everything past that is optional depth, and I've tried to keep each addition honestly
+scoped, tested, and documented rather than half-finished. If I were resubmitting to spec, I'd cut
+the comparison/ranking UI and the deployment polish and spend that time on the eval and tests
+instead.
 
-### Environment variables at a glance
-| Where | Variable | Value |
-|-------|----------|-------|
-| Backend | `OPENAI_API_KEY` | your OpenAI key |
-| Backend | `FRONTEND_ORIGIN` | frontend URL (or `*`) |
-| Frontend | `VITE_API_BASE` | backend URL |
-| Frontend | `VITE_USE_MOCKS` | `false` |
-| Frontend | `NITRO_PRESET` | `vercel` |
+## How I used AI assistants
 
----
+Built with heavy use of an AI coding assistant (Claude Code). I directed the architecture and made
+the engineering-judgment calls — hand-rolled loop vs LangGraph, agents vs functions, pgvector vs a
+dedicated DB, precompute vs runtime fetch, dropping `pytrends`, the safety approach — and reviewed,
+ran, and tested the output (the eval harness and unit tests exist partly to keep the assistant
+honest). The assistant accelerated implementation; the decisions and their justifications are mine.
 
-## Design notes
-- **OpenAI `gpt-4o-mini`** is the model throughout (your integration, preserved). Cost is
-  estimated from live token counts in `config.py`.
-- **World Bank** is a live API call with a curated fallback, so a slow/blocked API never breaks a run.
-- **Google Trends / `pytrends` was intentionally dropped from the deployed path** — it pulls in
-  `pandas` (heavy cold starts) and rate-limits constantly, which is fatal on serverless. It's
-  replaced by a lean, category-weighted interest model (`tools/platform_data.py`) that the
-  PlatformAgent reasons over. The original `tools/web_search.py` remains for reference/local use.
-- **CriticAgent** re-checks the brief against the data and adjusts confidence — the app's
-  self-verification step, and its most distinctive "agentic" feature.
+## What I'd do with more time
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and the API contract.
+1. **Real streaming** (SSE) so the reasoning trace is genuine, not optimistic.
+2. **Tool-output sanitization** against indirect prompt injection + an LLM-as-judge eval for prose.
+3. **Calibrate the Critic** (confidence floor) against a labelled set; add a calculator/code tool
+   so numeric claims are computed, not generated.
+4. **Harden for scale** (the interview prompt): cache by (country, business), a request queue, a
+   provider fallback for when OpenAI is down, and structured tracing/observability.
