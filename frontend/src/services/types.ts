@@ -77,6 +77,9 @@ export interface Report {
   regulatory?: { title: string; detail: string }[];
   gtm_timeline?: { phase: string; timeframe: string; actions: string[] }[];
   research_findings?: string[];
+  plan?: { goal?: string; gather: string[]; synthesize: string[]; reason?: string };
+  reasoning_log?: { node: string; note: string }[];
+  iterations?: number;
   citations: Citation[];
   cost: Cost;
   verification: Verification;

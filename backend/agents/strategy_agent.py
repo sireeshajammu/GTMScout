@@ -32,10 +32,18 @@ Rules:
         super().__init__(name="StrategyAgent", system_prompt=system_prompt)
 
     def execute(self, request: Dict, market_data: Dict, platform_recs: List[Dict],
-                research: Dict = None) -> Dict:
+                research: Dict = None, criticism: List[str] = None) -> Dict:
         budget = request.get("budget", 20000)
         currency = request.get("currency", "USD")
         top = platform_recs[:5]
+
+        # Reflection: on a re-run, inject the critic's findings so the model fixes them.
+        criticism_block = ""
+        if criticism:
+            criticism_block = (
+                "\n\nA reviewer flagged these problems with your PREVIOUS attempt — fix each one, "
+                "and do not repeat unsupported claims:\n" + "\n".join(f"- {c}" for c in criticism)
+            )
 
         research = research or {}
         findings = research.get("findings", [])
@@ -62,7 +70,7 @@ Verified market data:
 
 Ranked platforms:
 {chr(10).join(f"{p['rank']}. {p['platform']} ({p['interest_score']}/100) — {p['rationale']}" for p in top)}
-{research_block}
+{research_block}{criticism_block}
 
 Return the JSON brief. Budget amounts are in {currency}, total = {budget}.
 Ground the executive_summary and risks in the live research above when it is present."""

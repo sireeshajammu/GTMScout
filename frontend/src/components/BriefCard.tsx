@@ -4,7 +4,7 @@ import { ConfidenceMeter } from "./ConfidenceMeter";
 import { StatTile } from "./StatTile";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
-import { Copy, Download, ExternalLink, FileText, AlertTriangle } from "lucide-react";
+import { Copy, Download, ExternalLink, FileText, AlertTriangle, GitBranch, RefreshCw } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -70,6 +70,40 @@ export function BriefCard({ report }: { report: Report }) {
 
       {/* Body accordion */}
       <Accordion type="multiple" defaultValue={["market", "platforms", "budget"]} className="px-5 sm:px-6">
+        {report.plan && report.reasoning_log && report.reasoning_log.length > 0 && (
+          <AccordionItem value="reasoning">
+            <AccordionTrigger className="text-sm font-semibold">
+              <span className="flex items-center gap-2">
+                <GitBranch className="h-4 w-4" /> Agent reasoning
+                {typeof report.iterations === "number" && report.iterations > 1 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                    <RefreshCw className="h-3 w-3" /> self-corrected ×{report.iterations}
+                  </span>
+                )}
+              </span>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="mb-3 rounded-lg border border-border bg-muted/40 p-3 text-xs">
+                <span className="font-semibold">Plan:</span> gather{" "}
+                <span className="font-mono">{report.plan.gather.join(" ∥ ")}</span> in parallel → synthesize{" "}
+                <span className="font-mono">{report.plan.synthesize.join(" → ")}</span>
+                {report.plan.reason && (
+                  <div className="mt-1 text-muted-foreground">{report.plan.reason}</div>
+                )}
+              </div>
+              <ol className="relative space-y-2 border-l border-border pl-4">
+                {report.reasoning_log.map((s, i) => (
+                  <li key={i} className="relative text-sm">
+                    <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-primary" />
+                    <span className="font-mono text-xs uppercase text-primary">{s.node}</span>
+                    <span className="text-muted-foreground"> — {s.note}</span>
+                  </li>
+                ))}
+              </ol>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
         <AccordionItem value="market">
           <AccordionTrigger className="text-sm font-semibold">Market data</AccordionTrigger>
           <AccordionContent>
