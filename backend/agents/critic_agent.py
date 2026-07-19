@@ -16,6 +16,7 @@ plus the verified data it was built from. Your job is to catch problems, not to 
 Check for:
 - claims or numbers in the summary/risks that are NOT supported by the provided data,
 - a verdict that doesn't match the data (e.g. "GO" despite very low internet penetration),
+- a "GO"/"CAUTION" verdict for a business that is ILLEGAL in the target country (that must be "NOT YET"),
 - budget allocation that ignores the top platforms,
 - overconfidence given data gaps or use of cached/fallback data.
 

@@ -28,7 +28,11 @@ Rules:
 - budget_allocation percentages MUST sum to 100 and amounts MUST sum to the total budget.
 - Allocate primarily across the top 3 recommended platforms; you may reserve 5-15% for creative/localization.
 - Give 2-4 concrete risks. Flag low internet penetration (<70%), large GDP-per-capita gaps vs. home market, and platform mismatches.
-- Give 3-5 concrete next steps. Be specific to the country and business type."""
+- Give 3-5 concrete next steps. Be specific to the country and business type.
+- LEGALITY: if the business is illegal or criminally restricted in the TARGET country (e.g. cannabis
+  in Singapore, gambling where banned, alcohol where prohibited), the verdict MUST be "NOT YET",
+  confidence must be low, and the FIRST risk must be the legal prohibition (severity "high"). Never
+  return "GO" for something illegal in that market."""
         super().__init__(name="StrategyAgent", system_prompt=system_prompt)
 
     def execute(self, request: Dict, market_data: Dict, platform_recs: List[Dict],

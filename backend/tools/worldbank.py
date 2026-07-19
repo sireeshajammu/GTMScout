@@ -52,11 +52,41 @@ FALLBACK = {
 }
 
 
+# Major business cities -> their country (so "Dubai"/"Mumbai" resolve instead of failing).
+CITY_TO_COUNTRY = {
+    "dubai": "ARE", "abu dhabi": "ARE", "mumbai": "IND", "delhi": "IND", "new delhi": "IND",
+    "bangalore": "IND", "bengaluru": "IND", "shanghai": "CHN", "beijing": "CHN", "shenzhen": "CHN",
+    "sao paulo": "BRA", "são paulo": "BRA", "rio de janeiro": "BRA", "tokyo": "JPN", "osaka": "JPN",
+    "lagos": "NGA", "nairobi": "KEN", "istanbul": "TUR", "moscow": "RUS", "paris": "FRA",
+    "berlin": "DEU", "london": "GBR", "madrid": "ESP", "milan": "ITA", "toronto": "CAN",
+    "new york": "USA", "los angeles": "USA", "san francisco": "USA", "mexico city": "MEX",
+    "buenos aires": "ARG", "jakarta": "IDN", "bangkok": "THA", "seoul": "KOR", "sydney": "AUS",
+}
+
+# Names that map to more than one country — ask instead of guessing.
+AMBIGUOUS = {
+    "congo": "the Democratic Republic of the Congo or the Republic of the Congo",
+    "korea": "South Korea or North Korea",
+    "georgia": "the country Georgia or the US state",
+    "guinea": "Guinea, Guinea-Bissau, or Equatorial Guinea",
+}
+
+
+def is_ambiguous(country_name: str) -> Optional[str]:
+    """If the name is ambiguous, return a clarifying hint; else None."""
+    return AMBIGUOUS.get((country_name or "").lower().strip())
+
+
+def is_city(country_name: str) -> Optional[str]:
+    """If the name is a known city, return its country code; else None."""
+    return CITY_TO_COUNTRY.get((country_name or "").lower().strip())
+
+
 def get_country_code(country_name: str) -> Optional[str]:
-    """Resolve a country name / ISO-2 / ISO-3 to a World Bank ISO-3 code.
-    Curated aliases first (colloquial shorthands), then the full ISO-3166 index."""
+    """Resolve a country name / ISO-2 / ISO-3 / major city to a World Bank ISO-3 code.
+    Aliases first (colloquial shorthands), then the ISO-3166 index, then major cities."""
     n = (country_name or "").lower().strip()
-    return COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n)
+    return COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n) or CITY_TO_COUNTRY.get(n)
 
 
 def _fetch_indicator(country_code: str, indicator_code: str) -> Dict:
@@ -94,7 +124,8 @@ def get_country_data(country_name: str) -> Dict:
     if not country_code:
         return {
             "success": False,
-            "error": f"Country '{country_name}' is not supported yet.",
+            "error": f"I couldn't recognize '{country_name}' as a country. "
+            "If it's a city, tell me the country instead; otherwise check the spelling.",
             "country": country_name,
         }
 

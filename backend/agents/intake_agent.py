@@ -28,10 +28,14 @@ Intents:
   3-6 real countries yourself). Include business_type + budget.
 - "reply": greeting, a follow-up question about a prior report, or still missing a country/business.
   Write a concise "reply" grounded in the SPECIFIC numbers from the transcript. Never generic.
+- "refuse": the business itself is clearly illegal or harmful (weapons/arms trafficking, illegal
+  drugs, human trafficking, counterfeiting, etc.). Set a short "reply" declining to build a plan.
+  (Note: a lawful business that merely faces heavy regulation is NOT a refuse — analyze it normally
+  and let the strategy flag the legal risk.)
 
 Return ONLY this JSON:
 {
-  "intent": "new_report" | "comparison" | "ranking" | "reply",
+  "intent": "new_report" | "comparison" | "ranking" | "reply" | "refuse",
   "request": {
     "target_country": "<country or empty>",
     "business_type": "<business type or empty>",

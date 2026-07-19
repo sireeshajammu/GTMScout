@@ -25,11 +25,17 @@ from agents.deepdive_agent import DeepDiveAgent
 from agents.comparison_agent import ComparisonAgent
 from agents.ranking_agent import RankingAgent
 from contracts import validate_report
+from safety import is_blocked, REFUSAL
+from tools.worldbank import is_ambiguous
 from config import usd_cost
 
 # --- agent-loop tuning ---
 MAX_STRATEGY_ATTEMPTS = 2   # 1 initial + up to 1 reflective revision
 CONFIDENCE_FLOOR = 70       # below this, the loop tries to strengthen the answer
+
+# --- input validation ---
+MIN_BUDGET = 500
+MAX_BUDGET = 100_000_000    # $100M — above this, almost certainly a typo
 
 
 @dataclass
@@ -72,6 +78,23 @@ def _ranking_message(ranking: Dict) -> Dict:
     return {"id": _uid("msg"), "role": "assistant", "kind": "ranking", "ranking": ranking, "created_at": _now()}
 
 
+def _clarify(intake, text: str) -> Dict:
+    msg = _text_message(text)
+    msg["_cost"] = _cost_block([intake])
+    return msg
+
+
+def _budget_issue(b: float) -> Optional[str]:
+    """Return a clarifying message if the budget is implausible, else None."""
+    if b < MIN_BUDGET:
+        return (f"A market-entry test usually needs at least ~${MIN_BUDGET:,.0f} to be meaningful — "
+                f"you entered ${b:,.0f}. Did you mean a larger amount (e.g. $5,000)?")
+    if b > MAX_BUDGET:
+        return (f"${b:,.0f} is an unusually large go-to-market budget — please confirm the amount "
+                "(e.g. did you mean $50 million rather than $50 billion?).")
+    return None
+
+
 def run_research(
     text: str,
     history: Optional[List[Dict]] = None,
@@ -84,10 +107,18 @@ def run_research(
     analyzed = [r.get("request", {}).get("target_country") for r in reports if r.get("request")]
     analyzed = [c for c in analyzed if c]
 
+    # ---------- SAFETY GATE (deterministic, before any LLM call) ----------
+    if is_blocked(text):
+        return _text_message(REFUSAL)
+
     intake = IntakeAgent()
     parsed = intake.execute(text, history=history, analyzed_countries=analyzed)
     intent = parsed.get("intent", "reply")
     req = parsed.get("request", {}) or {}
+
+    # ---------- REFUSE (semantic — intake caught a harmful/illegal ask) ----------
+    if intent == "refuse":
+        return _clarify(intake, parsed.get("reply") or REFUSAL)
 
     # ---------- REPLY ----------
     if intent == "reply":
@@ -99,8 +130,14 @@ def run_research(
     # ---------- RANKING ----------
     if intent == "ranking":
         countries = req.get("countries") or []
-        business_type = req.get("business_type") or _infer_business(reports) or "general"
+        business_type = (req.get("business_type") or _infer_business(reports) or "").strip()
+        if not business_type:
+            return _clarify(intake, "What type of business should I rank these markets for? "
+                                    "(e.g. consumer app, B2B SaaS, fintech)")
         b = float(budget or req.get("budget") or 20000)
+        issue = _budget_issue(b)
+        if issue:
+            return _clarify(intake, issue)
         ccy = currency or req.get("currency") or "USD"
         if len(countries) < 2:
             # not really a ranking — fall through to a single report if possible
@@ -147,17 +184,31 @@ def run_research(
         return msg
 
     # ---------- NEW REPORT ----------
+    target = (req.get("target_country") or "").strip()
+    if not target:
+        return _clarify(intake, "Which country should I analyze? Tell me the market and business type.")
+
+    amb = is_ambiguous(target)
+    if amb:
+        return _clarify(intake, f"“{target}” is ambiguous — did you mean {amb}? Tell me which one.")
+
+    business_type = (req.get("business_type") or "").strip()
+    if not business_type:
+        return _clarify(intake, "What type of business is this for? "
+                                "(e.g. consumer app, B2B SaaS, fintech, fast fashion, e-commerce)")
+
+    b = float(budget or req.get("budget") or 20000)
+    issue = _budget_issue(b)
+    if issue:
+        return _clarify(intake, issue)
+
     request = {
-        "target_country": req.get("target_country") or "",
-        "business_type": req.get("business_type") or "general",
+        "target_country": target,
+        "business_type": business_type,
         "home_country": home_country or req.get("home_country") or "United States",
-        "budget": float(budget or req.get("budget") or 20000),
+        "budget": b,
         "currency": currency or req.get("currency") or "USD",
     }
-    if not request["target_country"].strip():
-        msg = _text_message("Which country should I analyze? Tell me the market and business type.")
-        msg["_cost"] = _cost_block([intake])
-        return msg
     return _run_report(intake, request, home_country, request["budget"], request["currency"])
 
 
