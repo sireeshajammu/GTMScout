@@ -257,13 +257,19 @@ function summarizeReport(r: Report): string {
   );
 }
 
-function applyUsage(report: Report) {
-  store.profile.usage.total_tokens_in += report.cost.total_tokens_in;
-  store.profile.usage.total_tokens_out += report.cost.total_tokens_out;
-  store.profile.usage.total_usd = Number(
-    (store.profile.usage.total_usd + report.cost.usd).toFixed(4),
-  );
+function applyCost(cost?: { total_tokens_in: number; total_tokens_out: number; usd: number }) {
+  if (!cost) return;
+  store.profile.usage.total_tokens_in += cost.total_tokens_in;
+  store.profile.usage.total_tokens_out += cost.total_tokens_out;
+  store.profile.usage.total_usd = Number((store.profile.usage.total_usd + cost.usd).toFixed(4));
   store.profile.usage.runs_count += 1;
+}
+
+// Track usage for whichever assistant message kind came back.
+function applyMessageUsage(m: Message) {
+  if (m.kind === "report") applyCost(m.report?.cost);
+  else if (m.kind === "comparison") applyCost(m.comparison?.cost);
+  else if (m.kind === "ranking") applyCost(m.ranking?.cost);
 }
 
 // -------- send message --------
@@ -310,12 +316,19 @@ export async function sendMessage(
     const assistantMsg = makeReportMessage(report);
     conv.messages = [...conv.messages, assistantMsg];
     conv.updated_at = now();
-    applyUsage(report);
+    applyCost(report.cost);
     emit();
     return assistantMsg;
   }
 
   // ---- REAL BACKEND ----
+  // Send the structured reports already in this conversation so the backend can
+  // build side-by-side comparisons / rankings without re-analyzing.
+  const reports = conv.messages
+    .filter((m) => m.kind === "report" && m.report)
+    .slice(-4)
+    .map((m) => m.report as Report);
+
   const control = { cancelled: false };
   // Optimistic stepper runs while the backend works (backend is a single POST).
   const steps = playSteps(onEvent, control);
@@ -325,7 +338,7 @@ export async function sendMessage(
     const resp = await fetch(`${API_BASE}/api/research`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, history }),
+      body: JSON.stringify({ text, history, reports }),
     });
     if (!resp.ok) throw new Error(`Backend error ${resp.status}`);
     assistantMsg = (await resp.json()) as Message;
@@ -350,9 +363,7 @@ export async function sendMessage(
 
   conv.messages = [...conv.messages, assistantMsg];
   conv.updated_at = now();
-  if (assistantMsg.kind === "report" && assistantMsg.report) {
-    applyUsage(assistantMsg.report);
-  }
+  applyMessageUsage(assistantMsg);
   emit();
   return assistantMsg;
 }

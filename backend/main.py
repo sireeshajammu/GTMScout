@@ -38,6 +38,7 @@ class HistoryItem(BaseModel):
 class ResearchBody(BaseModel):
     text: str
     history: Optional[List[HistoryItem]] = None
+    reports: Optional[List[dict]] = None  # full prior reports (for comparison/ranking context)
     home_country: Optional[str] = None
     budget: Optional[float] = None
     currency: Optional[str] = None
@@ -65,6 +66,7 @@ def research(body: ResearchBody):
     msg = run_research(
         text=body.text.strip(),
         history=history,
+        reports=body.reports,
         home_country=body.home_country,
         budget=body.budget,
         currency=body.currency,

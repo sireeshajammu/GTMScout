@@ -1,5 +1,7 @@
 import type { Message, ProgressEvent } from "@/services/types";
 import { BriefCard } from "./BriefCard";
+import { ComparisonCard } from "./ComparisonCard";
+import { RankingCard } from "./RankingCard";
 import { AgentStepper } from "./AgentStepper";
 import { Bot, User } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -19,11 +21,13 @@ export function MessageBubble({ msg }: { msg: Message }) {
           isUser
             ? "bg-primary text-primary-foreground rounded-br-sm"
             : "bg-muted/60 text-foreground rounded-bl-sm",
-          msg.kind === "report" && "!bg-transparent !p-0 !max-w-full flex-1",
+          msg.kind !== "text" && !isUser && "!bg-transparent !p-0 !max-w-full flex-1",
         )}
       >
         {msg.kind === "text" && <TextContent text={msg.text ?? ""} />}
         {msg.kind === "report" && msg.report && <BriefCard report={msg.report} />}
+        {msg.kind === "comparison" && msg.comparison && <ComparisonCard comparison={msg.comparison} />}
+        {msg.kind === "ranking" && msg.ranking && <RankingCard ranking={msg.ranking} />}
       </div>
       {isUser && (
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-foreground">

@@ -4,79 +4,69 @@ from typing import Dict, List, Optional
 
 class IntakeAgent(Agent):
     """
-    Conversational router. Reads the whole recent conversation (not just the last
-    message) and decides one of two things:
-      - intent "new_report": we now have enough to run a market-entry analysis, so
-        it returns the accumulated {target_country, business_type, home_country,
-        budget, currency}.
-      - intent "reply": the message is a greeting, a follow-up question about the
-        previous report, or is still missing a country/business — so it returns a
-        short conversational reply instead.
-
-    Reading the transcript is what makes the app feel like a chat rather than a
-    one-shot form: "software development" + an earlier "India" now combine.
+    Conversational router. Reads the whole recent conversation + the newest message
+    and picks one of four intents:
+      - "new_report": run a single-market brief (accumulates country/business/budget).
+      - "comparison": build a side-by-side of markets ALREADY analyzed in this chat.
+      - "ranking": analyze and rank several candidate markets (may be new).
+      - "reply": greeting, follow-up question, or missing info -> a grounded text reply.
     """
 
     def __init__(self):
-        system_prompt = """You are the conversational router for a market-entry research assistant.
-You read the ENTIRE recent conversation plus the newest user message, then respond with JSON.
+        system_prompt = """You are the router for a market-entry research assistant. You read the
+recent conversation and the newest user message, then respond with JSON.
 
-Decide the intent:
-- "new_report": the conversation now identifies BOTH a target country and a business type.
-  Accumulate details across ALL turns (a country mentioned earlier + a business type mentioned
-  later together count). Carry over the budget/home country/currency from earlier turns if the
-  newest message doesn't restate them.
-- "reply": use this when the message is a greeting, a follow-up question about a previous report,
-  OR a request to compare/recommend between markets already analyzed in the conversation.
-  Write a helpful, concise "reply" grounded in the SPECIFIC numbers from the transcript (platform
-  interest scores, budget split %, named risks, verdict/confidence, market data, research findings)
-  — never give generic advice. e.g. "Instagram leads at 100/100 and takes 45% ($6,750) because…".
-  BE DECISIVE: if the user asks which market is better or what you recommend (e.g. "USA or Brazil?",
-  "which is the better bet?"), and reports for those markets are in the conversation, PICK ONE and
-  justify it with 2-4 concrete reasons drawn from the reports (market size/growth from research
-  findings, internet penetration, GDP per capita, competition, budget efficiency, verdict &
-  confidence). Do NOT deflect with "which would you like to explore?" — commit to a recommendation.
+Intents:
+- "new_report": the conversation identifies BOTH a target country and a business type. Accumulate
+  details across turns; carry over budget/home/currency from earlier turns if not restated.
+- "comparison": the user wants to compare or decide between markets that have ALREADY been analyzed
+  in this conversation (their countries appear in ANALYZED_MARKETS). Put those countries in
+  request.countries. Examples: "compare Brazil and USA", "show them side by side", "which is better".
+- "ranking": the user wants several markets evaluated/ranked, and at least one is NOT already
+  analyzed, OR they use ranking language ("rank", "best N markets", "top markets in LATAM").
+  Put the candidate countries in request.countries (expand a region like "LATAM" or "Europe" into
+  3-6 real countries yourself). Include business_type + budget.
+- "reply": greeting, a follow-up question about a prior report, or still missing a country/business.
+  Write a concise "reply" grounded in the SPECIFIC numbers from the transcript. Never generic.
 
 Return ONLY this JSON:
 {
-  "intent": "new_report" | "reply",
+  "intent": "new_report" | "comparison" | "ranking" | "reply",
   "request": {
     "target_country": "<country or empty>",
     "business_type": "<business type or empty>",
     "home_country": "<home country if known, else 'United States'>",
     "budget": <number, default 20000>,
-    "currency": "<3-letter code, default 'USD'>"
+    "currency": "<3-letter code, default 'USD'>",
+    "countries": ["<for comparison/ranking>", ...]
   },
-  "reply": "<text to show the user when intent is 'reply'; else empty string>"
+  "reply": "<text when intent is 'reply'; else empty string>"
 }
 
 Rules:
-- Normalize country names to common English (e.g. 'brasil' -> 'Brazil').
+- Normalize country names to common English ('brasil' -> 'Brazil').
 - Parse budgets like '$15k', '20,000 USD', '30k euros' into a number + currency.
-- PIVOT (important): if the newest message asks to analyze ONE (possibly different) country —
-  e.g. "now do Mexico", "what about France?", "same analysis for Vietnam", "try India instead" —
-  set intent "new_report" for THAT country and INHERIT the business_type, budget, home_country and
-  currency from the most recent report in the conversation. A pivot to a new country is NOT a
-  comparison — never ask the user to choose between the old country and the new one.
-- PARAMETER CHANGE: if the newest message only changes the budget, business type, or home country
-  for a market already in the conversation (e.g. "what if I cut the budget to $5k?", "make it $50k",
-  "same but for a fintech"), set intent "new_report" for that SAME country, inherit the unchanged
-  details, and apply the new value — so a real re-computed brief is produced. Do NOT just estimate
-  a new budget split in text; re-run the analysis.
-- COMPARE: only when the NEWEST message itself names two or more countries to compare AND none is
-  singled out (e.g. "compare Brazil vs India"), set intent "reply" and ask which single country to
-  start with (we analyze one market per brief).
-- Only set intent "new_report" when target_country AND business_type are both non-empty.
-"""
+- PIVOT: "now do Mexico", "what about France?", "try India instead" -> new_report for THAT country,
+  inheriting business_type/budget/home/currency from the most recent report. A pivot is NOT a
+  comparison.
+- PARAMETER CHANGE: "cut the budget to $5k", "make it $50k", "same but a fintech" -> new_report for
+  the SAME country with the new value, inheriting the rest. Re-run; do not estimate in text.
+- COMPARISON vs REPLY: if the user asks "which is better?" about already-analyzed markets, prefer
+  intent "comparison" (a structured side-by-side) over a plain reply.
+- Only set new_report when target_country AND business_type are both non-empty.
+- For comparison/ranking, business_type must be known (from the request or the transcript)."""
         super().__init__(name="IntakeAgent", system_prompt=system_prompt)
 
-    def execute(self, text: str, history: Optional[List[Dict]] = None) -> Dict:
+    def execute(self, text: str, history: Optional[List[Dict]] = None,
+                analyzed_countries: Optional[List[str]] = None) -> Dict:
         transcript = self._format_history(history)
+        analyzed = ", ".join(analyzed_countries or []) or "(none yet)"
         prompt = (
             (f"Conversation so far:\n{transcript}\n\n" if transcript else "")
+            + f"ANALYZED_MARKETS (already have a report this chat): {analyzed}\n\n"
             + f'Newest user message: "{text}"\n\nReturn the JSON object.'
         )
-        result = self.call_json(prompt, max_tokens=400)
+        result = self.call_json(prompt, max_tokens=450)
 
         if not result.get("success"):
             return {

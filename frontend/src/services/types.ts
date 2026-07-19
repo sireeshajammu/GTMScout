@@ -72,6 +72,10 @@ export interface Report {
   budget_allocation: BudgetItem[];
   risks: Risk[];
   next_steps: string[];
+  competitors?: { name: string; note: string }[];
+  unit_economics?: { metric: string; value: string; note: string }[];
+  regulatory?: { title: string; detail: string }[];
+  gtm_timeline?: { phase: string; timeframe: string; actions: string[] }[];
   research_findings?: string[];
   citations: Citation[];
   cost: Cost;
@@ -89,12 +93,54 @@ export interface ProgressEvent {
   timestamp: string;
 }
 
+export interface ComparisonMarket {
+  country: string;
+  business_type: string;
+  verdict: Verdict;
+  confidence: number;
+  population: number | null;
+  gdp_per_capita: number | null;
+  internet_penetration: number | null;
+  top_platform: string | null;
+  budget: number | null;
+  currency: string;
+  market_note?: string;
+}
+
+export interface ComparisonReport {
+  markets: ComparisonMarket[];
+  recommendation: { pick: string; reasons: string[] };
+  cost?: Cost;
+}
+
+export interface RankingItem {
+  rank: number;
+  country: string;
+  score: number;
+  verdict: Verdict;
+  rationale: string;
+  population: number | null;
+  gdp_per_capita: number | null;
+  internet_penetration: number | null;
+}
+
+export interface RankingReport {
+  business_type: string;
+  budget: number;
+  currency: string;
+  items: RankingItem[];
+  note: string;
+  cost?: Cost;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
-  kind: "text" | "report";
+  kind: "text" | "report" | "comparison" | "ranking";
   text?: string;
   report?: Report;
+  comparison?: ComparisonReport;
+  ranking?: RankingReport;
   created_at: string;
 }
 

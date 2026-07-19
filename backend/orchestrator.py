@@ -1,8 +1,12 @@
 """Orchestrator: turns a chat message into an assistant Message.
 
-Pipeline:  IntakeAgent -> (clarify | DataAgent -> PlatformAgent -> StrategyAgent -> CriticAgent)
-Assembles a Report that matches the frontend's TypeScript `Report`/`Message` types,
-aggregates token cost across all agents, and attaches structured citations.
+Routes four intents from the IntakeAgent:
+  new_report  -> Data -> Research -> Platform -> Strategy -> Critic -> DeepDive  (full brief)
+  comparison  -> side-by-side of markets already analyzed this chat (+ recommendation)
+  ranking     -> lightweight analyze + rank several candidate markets
+  reply       -> grounded conversational text (follow-ups, greetings, clarifications)
+
+Assembles objects matching the frontend TypeScript types and aggregates token cost.
 """
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +18,9 @@ from agents.research_agent import ResearchAgent
 from agents.platform_agent import PlatformAgent
 from agents.strategy_agent import StrategyAgent
 from agents.critic_agent import CriticAgent
+from agents.deepdive_agent import DeepDiveAgent
+from agents.comparison_agent import ComparisonAgent
+from agents.ranking_agent import RankingAgent
 from config import usd_cost
 
 
@@ -33,34 +40,89 @@ def _report_message(report: Dict) -> Dict:
     return {"id": _uid("msg"), "role": "assistant", "kind": "report", "report": report, "created_at": _now()}
 
 
+def _comparison_message(comparison: Dict) -> Dict:
+    return {"id": _uid("msg"), "role": "assistant", "kind": "comparison", "comparison": comparison, "created_at": _now()}
+
+
+def _ranking_message(ranking: Dict) -> Dict:
+    return {"id": _uid("msg"), "role": "assistant", "kind": "ranking", "ranking": ranking, "created_at": _now()}
+
+
 def run_research(
     text: str,
     history: Optional[List[Dict]] = None,
+    reports: Optional[List[Dict]] = None,
     home_country: Optional[str] = None,
     budget: Optional[float] = None,
     currency: Optional[str] = None,
 ) -> Dict:
-    """Main entry point. Returns an assistant Message dict (text or report).
-
-    `history` is the recent conversation ([{role, text}, ...]) so the intake agent
-    can accumulate context across turns and answer follow-up questions.
-    """
+    reports = reports or []
+    analyzed = [r.get("request", {}).get("target_country") for r in reports if r.get("request")]
+    analyzed = [c for c in analyzed if c]
 
     intake = IntakeAgent()
-    parsed = intake.execute(text, history=history)
+    parsed = intake.execute(text, history=history, analyzed_countries=analyzed)
+    intent = parsed.get("intent", "reply")
+    req = parsed.get("request", {}) or {}
 
-    # Not enough info yet, a greeting, or a follow-up question -> conversational reply.
-    if parsed.get("intent") != "new_report":
-        msg = _text_message(
-            parsed.get("reply")
-            or "Tell me the target country, business type, and budget and I'll run the analysis."
-        )
-        # attach the tiny intake cost so usage still tracks
+    # ---------- REPLY ----------
+    if intent == "reply":
+        msg = _text_message(parsed.get("reply") or
+                            "Tell me the target country, business type, and budget and I'll run the analysis.")
         msg["_cost"] = _cost_block([intake])
         return msg
 
-    req = parsed.get("request", {})
-    # Allow explicit overrides from the client, else use parsed values.
+    # ---------- RANKING ----------
+    if intent == "ranking":
+        countries = req.get("countries") or []
+        business_type = req.get("business_type") or _infer_business(reports) or "general"
+        b = float(budget or req.get("budget") or 20000)
+        ccy = currency or req.get("currency") or "USD"
+        if len(countries) < 2:
+            # not really a ranking — fall through to a single report if possible
+            if countries:
+                req["target_country"] = countries[0]
+                req["business_type"] = business_type
+                return _run_report(intake, req, home_country, b, ccy)
+            msg = _text_message("Which markets should I rank? Name a few countries (or a region) and the business type.")
+            msg["_cost"] = _cost_block([intake])
+            return msg
+        ranking_agent = RankingAgent()
+        out = ranking_agent.execute(countries, business_type, b, ccy)
+        if not out.get("success"):
+            msg = _text_message(out.get("error", "I couldn't rank those markets. Try naming specific countries."))
+            msg["_cost"] = _cost_block([intake, ranking_agent])
+            return msg
+        out["cost"] = _cost_block([intake, ranking_agent])
+        return _ranking_message(out)
+
+    # ---------- COMPARISON ----------
+    if intent == "comparison":
+        wanted = set(c.lower() for c in (req.get("countries") or analyzed))
+        matched = [r for r in reports if r.get("request", {}).get("target_country", "").lower() in wanted]
+        if len(matched) < 2:
+            matched = reports  # fall back to everything we have
+        if len(matched) >= 2:
+            comp_agent = ComparisonAgent()
+            comp = comp_agent.build(matched)
+            comp["cost"] = _cost_block([intake, comp_agent])
+            return _comparison_message(comp)
+        # Not enough analyzed markets yet -> rank the requested ones fresh.
+        countries = req.get("countries") or analyzed
+        if len(countries) >= 2:
+            business_type = req.get("business_type") or _infer_business(reports) or "general"
+            ranking_agent = RankingAgent()
+            out = ranking_agent.execute(countries, business_type,
+                                        float(budget or req.get("budget") or 20000),
+                                        currency or req.get("currency") or "USD")
+            if out.get("success"):
+                out["cost"] = _cost_block([intake, ranking_agent])
+                return _ranking_message(out)
+        msg = _text_message("I need at least two analyzed markets to compare. Ask me to analyze each first.")
+        msg["_cost"] = _cost_block([intake])
+        return msg
+
+    # ---------- NEW REPORT ----------
     request = {
         "target_country": req.get("target_country") or "",
         "business_type": req.get("business_type") or "general",
@@ -68,19 +130,29 @@ def run_research(
         "budget": float(budget or req.get("budget") or 20000),
         "currency": currency or req.get("currency") or "USD",
     }
-
-    # Safety net: if the router mislabeled intent without a country, ask instead of erroring.
     if not request["target_country"].strip():
         msg = _text_message("Which country should I analyze? Tell me the market and business type.")
         msg["_cost"] = _cost_block([intake])
         return msg
+    return _run_report(intake, request, home_country, request["budget"], request["currency"])
 
-    # --- Agent pipeline ---
+
+def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
+    """Full single-market brief with deep-dive sections."""
+    request = {
+        "target_country": request.get("target_country"),
+        "business_type": request.get("business_type") or "general",
+        "home_country": home_country or request.get("home_country") or "United States",
+        "budget": float(budget or request.get("budget") or 20000),
+        "currency": currency or request.get("currency") or "USD",
+    }
+
     data_agent = DataAgent()
     research_agent = ResearchAgent()
     platform_agent = PlatformAgent()
     strategy_agent = StrategyAgent()
     critic_agent = CriticAgent()
+    deepdive_agent = DeepDiveAgent()
 
     data_out = data_agent.execute(request["target_country"])
     if not data_out.get("success"):
@@ -91,7 +163,6 @@ def run_research(
         m["_cost"] = _cost_block([intake, data_agent])
         return m
 
-    # Live web research (Tavily) — grounds the strategy in current evidence.
     research_out = research_agent.execute(request["target_country"], request["business_type"])
 
     platform_out = platform_agent.execute(request["target_country"], request["business_type"])
@@ -110,22 +181,21 @@ def run_research(
     critic_out = critic_agent.execute(
         request, data_out["market_data"], strategy_out, data_out.get("is_fallback", False)
     )
-
-    # Apply critic confidence adjustment
-    confidence = strategy_out["confidence"] + critic_out.get("confidence_delta", 0)
-    confidence = int(max(0, min(100, confidence)))
-
-    # --- Assemble citations with ids (World Bank + interest model + live web sources) ---
-    raw_citations = (
-        data_out.get("citations", [])
-        + platform_out.get("citations", [])
-        + research_out.get("citations", [])
+    deep_out = deepdive_agent.execute(
+        request, data_out["market_data"], platform_out.get("platform_recommendations", []), research=research_out
     )
-    citations = []
-    for i, c in enumerate(raw_citations, start=1):
-        citations.append({"id": i, "source": c.get("source", ""), "detail": c.get("detail", ""), "url": c.get("url")})
 
-    agents = [intake, data_agent, research_agent, platform_agent, strategy_agent, critic_agent]
+    confidence = int(max(0, min(100, strategy_out["confidence"] + critic_out.get("confidence_delta", 0))))
+
+    raw_citations = (
+        data_out.get("citations", []) + platform_out.get("citations", []) + research_out.get("citations", [])
+    )
+    citations = [
+        {"id": i, "source": c.get("source", ""), "detail": c.get("detail", ""), "url": c.get("url")}
+        for i, c in enumerate(raw_citations, start=1)
+    ]
+
+    agents = [intake, data_agent, research_agent, platform_agent, strategy_agent, critic_agent, deepdive_agent]
 
     report = {
         "id": _uid("rep"),
@@ -138,6 +208,10 @@ def run_research(
         "budget_allocation": strategy_out["budget_allocation"],
         "risks": strategy_out["risks"],
         "next_steps": strategy_out["next_steps"],
+        "competitors": deep_out.get("competitors", []),
+        "unit_economics": deep_out.get("unit_economics", []),
+        "regulatory": deep_out.get("regulatory", []),
+        "gtm_timeline": deep_out.get("gtm_timeline", []),
         "research_findings": research_out.get("findings", []),
         "citations": citations,
         "cost": _cost_block(agents),
@@ -152,6 +226,14 @@ def run_research(
     return _report_message(report)
 
 
+def _infer_business(reports: List[Dict]) -> Optional[str]:
+    for r in reversed(reports):
+        bt = r.get("request", {}).get("business_type")
+        if bt:
+            return bt
+    return None
+
+
 def _research_brief(research_out: Dict) -> str:
     findings = research_out.get("findings", [])
     if not findings:
@@ -160,18 +242,13 @@ def _research_brief(research_out: Dict) -> str:
 
 
 def _cost_block(agents) -> Dict:
-    """Aggregate token usage + USD cost across a list of agents."""
     per_agent = []
     total_in = total_out = 0
     for a in agents:
         stats = a.get_token_stats()
         total_in += stats["tokens_in"]
         total_out += stats["tokens_out"]
-        per_agent.append({
-            "agent": stats["agent"],
-            "tokens_in": stats["tokens_in"],
-            "tokens_out": stats["tokens_out"],
-        })
+        per_agent.append({"agent": stats["agent"], "tokens_in": stats["tokens_in"], "tokens_out": stats["tokens_out"]})
     return {
         "total_tokens_in": total_in,
         "total_tokens_out": total_out,

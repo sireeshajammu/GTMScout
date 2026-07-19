@@ -263,6 +263,88 @@ export function BriefCard({ report }: { report: Report }) {
           </AccordionContent>
         </AccordionItem>
 
+        {report.competitors && report.competitors.length > 0 && (
+          <AccordionItem value="competitors">
+            <AccordionTrigger className="text-sm font-semibold">
+              Competitors ({report.competitors.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <ul className="space-y-2">
+                {report.competitors.map((c, i) => (
+                  <li key={i} className="text-sm">
+                    <span className="font-semibold">{c.name}</span>
+                    <span className="text-muted-foreground"> — {c.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {report.unit_economics && report.unit_economics.length > 0 && (
+          <AccordionItem value="unit-economics">
+            <AccordionTrigger className="text-sm font-semibold">Unit economics (est.)</AccordionTrigger>
+            <AccordionContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {report.unit_economics.map((u, i) => (
+                    <tr key={i} className="border-b border-border/60 last:border-0">
+                      <td className="py-1.5 pr-3 text-muted-foreground">{u.metric}</td>
+                      <td className="py-1.5 pr-3 font-mono font-semibold">{u.value}</td>
+                      <td className="py-1.5 text-muted-foreground">{u.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {report.regulatory && report.regulatory.length > 0 && (
+          <AccordionItem value="regulatory">
+            <AccordionTrigger className="text-sm font-semibold">
+              Regulatory ({report.regulatory.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <ul className="space-y-2.5">
+                {report.regulatory.map((r, i) => (
+                  <li key={i} className="text-sm">
+                    <div className="font-semibold">{r.title}</div>
+                    <div className="text-muted-foreground">{r.detail}</div>
+                  </li>
+                ))}
+              </ul>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {report.gtm_timeline && report.gtm_timeline.length > 0 && (
+          <AccordionItem value="gtm">
+            <AccordionTrigger className="text-sm font-semibold">Go-to-market timeline</AccordionTrigger>
+            <AccordionContent>
+              <ol className="relative space-y-4 border-l border-border pl-5">
+                {report.gtm_timeline.map((p, i) => (
+                  <li key={i} className="relative">
+                    <span className="absolute -left-[23px] top-1 h-3 w-3 rounded-full border-2 border-primary bg-background" />
+                    <div className="flex flex-wrap items-baseline gap-2">
+                      <span className="font-semibold">{p.phase}</span>
+                      <span className="text-xs text-muted-foreground">{p.timeframe}</span>
+                    </div>
+                    <ul className="mt-1 space-y-1">
+                      {p.actions.map((a, j) => (
+                        <li key={j} className="flex items-start gap-2 text-sm text-foreground/85">
+                          <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
+                          <span>{a}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </li>
+                ))}
+              </ol>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
         {report.research_findings && report.research_findings.length > 0 && (
           <AccordionItem value="research">
             <AccordionTrigger className="text-sm font-semibold">
