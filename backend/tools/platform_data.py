@@ -2,11 +2,11 @@
 
 Replaces the pytrends/pandas dependency on the deployed path. It returns a
 relative interest score (0-100) per social/marketing platform, weighted by the
-business category. Scores are a curated model informed by public platform-usage
-and ad-spend patterns; the LLM PlatformAgent reasons on top of them.
+business category. Scores are a hand-tuned heuristic (not learned) informed by
+public platform-usage and ad-spend patterns; the LLM PlatformAgent reasons on top.
 
-The original pytrends-based tool remains in tools/web_search.py for reference and
-local experimentation.
+This deliberately replaced a pytrends-based tool, which pulled in pandas (heavy
+serverless cold starts) and rate-limited constantly.
 """
 from typing import Dict, List
 

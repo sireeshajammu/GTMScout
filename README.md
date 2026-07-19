@@ -26,7 +26,7 @@ Intake (route/parse/refuse) → Planner (pick tools) → gather in PARALLEL
 
 It also routes non-report intents: **clarify** (under-specified), **refuse** (illegal business),
 **comparison** (side-by-side of analyzed markets), and **ranking** (score several markets). Full
-design in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## How it maps to the assignment's core requirements
 
@@ -75,7 +75,7 @@ npm run dev                 # http://localhost:8080
 > With no `.env.local`, the UI runs on built-in **mock data** (no backend needed).
 
 **Deploy:** two Vercel projects (backend + frontend) from one repo — full click-by-click in
-**[DEPLOYMENT.md](DEPLOYMENT.md)**.
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ---
 
@@ -92,7 +92,7 @@ npm run dev                 # http://localhost:8080
   Tradeoff: caps how much it can recover in one turn.
 - **Dropped `pytrends` for a transparent heuristic platform model.** `pytrends` pulls in `pandas`
   (heavy serverless cold starts) and rate-limits constantly. The heuristic is honest (hand-tuned
-  weights, *not* learned) and the LLM reasons on top. Kept `web_search.py` for reference.
+  weights, *not* learned) and the LLM reasons on top.
 - **Stateless backend + client-side chat state.** Conversations/history/profile live in
   `localStorage`; no server DB for chat → trivial serverless hosting. Only the RAG cache is
   server-side (and optional).
