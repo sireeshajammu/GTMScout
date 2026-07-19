@@ -26,12 +26,16 @@ Decide the intent:
   Accumulate details across ALL turns (a country mentioned earlier + a business type mentioned
   later together count). Carry over the budget/home country/currency from earlier turns if the
   newest message doesn't restate them.
-- "reply": use this when the message is a greeting, OR is a follow-up question about the previous
-  report (e.g. "why LinkedIn?", "what are the risks?"), OR still lacks a country or business type.
-  In these cases write a helpful, concise "reply". When answering a follow-up about the previous
-  report, ground your answer in ITS SPECIFIC numbers from the transcript (the platform interest
-  scores, the budget split percentages, the named risks, the verdict/confidence) — do not give
-  generic advice. e.g. "Instagram leads at 100/100 and takes 45% ($6,750) of the budget because…".
+- "reply": use this when the message is a greeting, a follow-up question about a previous report,
+  OR a request to compare/recommend between markets already analyzed in the conversation.
+  Write a helpful, concise "reply" grounded in the SPECIFIC numbers from the transcript (platform
+  interest scores, budget split %, named risks, verdict/confidence, market data, research findings)
+  — never give generic advice. e.g. "Instagram leads at 100/100 and takes 45% ($6,750) because…".
+  BE DECISIVE: if the user asks which market is better or what you recommend (e.g. "USA or Brazil?",
+  "which is the better bet?"), and reports for those markets are in the conversation, PICK ONE and
+  justify it with 2-4 concrete reasons drawn from the reports (market size/growth from research
+  findings, internet penetration, GDP per capita, competition, budget efficiency, verdict &
+  confidence). Do NOT deflect with "which would you like to explore?" — commit to a recommendation.
 
 Return ONLY this JSON:
 {
@@ -54,6 +58,11 @@ Rules:
   set intent "new_report" for THAT country and INHERIT the business_type, budget, home_country and
   currency from the most recent report in the conversation. A pivot to a new country is NOT a
   comparison — never ask the user to choose between the old country and the new one.
+- PARAMETER CHANGE: if the newest message only changes the budget, business type, or home country
+  for a market already in the conversation (e.g. "what if I cut the budget to $5k?", "make it $50k",
+  "same but for a fintech"), set intent "new_report" for that SAME country, inherit the unchanged
+  details, and apply the new value — so a real re-computed brief is produced. Do NOT just estimate
+  a new budget split in text; re-run the analysis.
 - COMPARE: only when the NEWEST message itself names two or more countries to compare AND none is
   singled out (e.g. "compare Brazil vs India"), set intent "reply" and ask which single country to
   start with (we analyze one market per brief).

@@ -241,14 +241,19 @@ function summarizeReport(r: Report): string {
     .join(", ");
   const budget = r.budget_allocation.map((b) => `${b.platform} ${b.percentage}%`).join(", ");
   const risks = r.risks.map((x) => x.title).join("; ");
+  const md = r.market_data;
+  const findings = (r.research_findings ?? []).slice(0, 3).join(" | ");
   return (
     `[previous report] ${r.verdict} (confidence ${r.confidence}) for ` +
     `${r.request.target_country} · ${r.request.business_type}, ` +
     `budget ${r.request.budget} ${r.request.currency}.\n` +
+    `Market data: population ${md.population}, GDP/capita $${md.gdp_per_capita}, ` +
+    `internet ${md.internet_penetration}%.\n` +
     `Executive summary: ${r.executive_summary}\n` +
     `Platform interest: ${platforms}.\n` +
     `Budget split: ${budget}.\n` +
-    `Risks: ${risks}.`
+    `Risks: ${risks}.` +
+    (findings ? `\nLive findings: ${findings}.` : "")
   );
 }
 
