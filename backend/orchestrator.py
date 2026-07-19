@@ -212,9 +212,11 @@ def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
 
     state.obs.update(data=data_out, platform=platform_out, research=research_out)
     state.evidence += research_out.get("findings", [])
+    _rag = research_out.get("cached_used", 0)
     state.note("gather", f"macro data ({'cached' if data_out.get('is_fallback') else 'live'}), "
                          f"{len(platform_out.get('platform_recommendations', []))} platforms, "
-                         f"{len(research_out.get('findings', []))} web findings.")
+                         f"{len(research_out.get('findings', []))} web findings"
+                         + (f" (+{_rag} from RAG cache)" if _rag else "") + ".")
 
     md = data_out["market_data"]
     platforms = platform_out.get("platform_recommendations", [])
