@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from agents.intake_agent import IntakeAgent
 from agents.data_agent import DataAgent
+from agents.research_agent import ResearchAgent
 from agents.platform_agent import PlatformAgent
 from agents.strategy_agent import StrategyAgent
 from agents.critic_agent import CriticAgent
@@ -76,6 +77,7 @@ def run_research(
 
     # --- Agent pipeline ---
     data_agent = DataAgent()
+    research_agent = ResearchAgent()
     platform_agent = PlatformAgent()
     strategy_agent = StrategyAgent()
     critic_agent = CriticAgent()
@@ -89,16 +91,20 @@ def run_research(
         m["_cost"] = _cost_block([intake, data_agent])
         return m
 
+    # Live web research (Tavily) — grounds the strategy in current evidence.
+    research_out = research_agent.execute(request["target_country"], request["business_type"])
+
     platform_out = platform_agent.execute(request["target_country"], request["business_type"])
     if not platform_out.get("success"):
         platform_out = {"platform_recommendations": [], "citations": [], "brief": ""}
 
     strategy_out = strategy_agent.execute(
-        request, data_out["market_data"], platform_out.get("platform_recommendations", [])
+        request, data_out["market_data"], platform_out.get("platform_recommendations", []),
+        research=research_out,
     )
     if not strategy_out.get("success"):
         m = _text_message("The strategy step failed to produce a valid brief. Please try again.")
-        m["_cost"] = _cost_block([intake, data_agent, platform_agent, strategy_agent])
+        m["_cost"] = _cost_block([intake, data_agent, research_agent, platform_agent, strategy_agent])
         return m
 
     critic_out = critic_agent.execute(
@@ -109,13 +115,17 @@ def run_research(
     confidence = strategy_out["confidence"] + critic_out.get("confidence_delta", 0)
     confidence = int(max(0, min(100, confidence)))
 
-    # --- Assemble citations with ids ---
-    raw_citations = (data_out.get("citations", []) + platform_out.get("citations", []))
+    # --- Assemble citations with ids (World Bank + interest model + live web sources) ---
+    raw_citations = (
+        data_out.get("citations", [])
+        + platform_out.get("citations", [])
+        + research_out.get("citations", [])
+    )
     citations = []
     for i, c in enumerate(raw_citations, start=1):
         citations.append({"id": i, "source": c.get("source", ""), "detail": c.get("detail", ""), "url": c.get("url")})
 
-    agents = [intake, data_agent, platform_agent, strategy_agent, critic_agent]
+    agents = [intake, data_agent, research_agent, platform_agent, strategy_agent, critic_agent]
 
     report = {
         "id": _uid("rep"),
@@ -128,6 +138,7 @@ def run_research(
         "budget_allocation": strategy_out["budget_allocation"],
         "risks": strategy_out["risks"],
         "next_steps": strategy_out["next_steps"],
+        "research_findings": research_out.get("findings", []),
         "citations": citations,
         "cost": _cost_block(agents),
         "verification": critic_out["verification"],
@@ -135,9 +146,17 @@ def run_research(
             "data": data_out.get("brief", ""),
             "platform": platform_out.get("brief", ""),
             "strategy": strategy_out.get("brief", ""),
+            "research": _research_brief(research_out),
         },
     }
     return _report_message(report)
+
+
+def _research_brief(research_out: Dict) -> str:
+    findings = research_out.get("findings", [])
+    if not findings:
+        return research_out.get("brief", "")
+    return research_out.get("brief", "") + " Key findings: " + " | ".join(findings[:4])
 
 
 def _cost_block(agents) -> Dict:

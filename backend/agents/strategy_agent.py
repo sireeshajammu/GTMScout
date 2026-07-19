@@ -31,10 +31,22 @@ Rules:
 - Give 3-5 concrete next steps. Be specific to the country and business type."""
         super().__init__(name="StrategyAgent", system_prompt=system_prompt)
 
-    def execute(self, request: Dict, market_data: Dict, platform_recs: List[Dict]) -> Dict:
+    def execute(self, request: Dict, market_data: Dict, platform_recs: List[Dict],
+                research: Dict = None) -> Dict:
         budget = request.get("budget", 20000)
         currency = request.get("currency", "USD")
         top = platform_recs[:5]
+
+        research = research or {}
+        findings = research.get("findings", [])
+        web_risks = research.get("notable_risks", [])
+        research_block = ""
+        if findings or web_risks:
+            research_block = "\n\nLive web research (use this as evidence; prefer it over assumptions):\n"
+            research_block += "\n".join(f"- {f}" for f in findings)
+            if web_risks:
+                research_block += "\nRisks surfaced by research:\n" + "\n".join(f"- {r}" for r in web_risks)
+
         prompt = f"""Business request:
 - Target country: {request.get('target_country')}
 - Business type: {request.get('business_type')}
@@ -50,8 +62,10 @@ Verified market data:
 
 Ranked platforms:
 {chr(10).join(f"{p['rank']}. {p['platform']} ({p['interest_score']}/100) — {p['rationale']}" for p in top)}
+{research_block}
 
-Return the JSON brief. Budget amounts are in {currency}, total = {budget}."""
+Return the JSON brief. Budget amounts are in {currency}, total = {budget}.
+Ground the executive_summary and risks in the live research above when it is present."""
 
         res = self.call_json(prompt, max_tokens=900, temperature=0.4)
         if not res.get("success"):

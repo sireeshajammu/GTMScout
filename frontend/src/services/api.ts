@@ -233,6 +233,25 @@ function detectMarketQuestion(text: string): Report | null {
   return null;
 }
 
+// Rich summary of a prior report so the backend can answer follow-up questions
+// ("why Instagram?", "what were the risks?") using THIS report's real numbers.
+function summarizeReport(r: Report): string {
+  const platforms = r.platform_recommendations
+    .map((p) => `${p.platform} ${p.interest_score}/100`)
+    .join(", ");
+  const budget = r.budget_allocation.map((b) => `${b.platform} ${b.percentage}%`).join(", ");
+  const risks = r.risks.map((x) => x.title).join("; ");
+  return (
+    `[previous report] ${r.verdict} (confidence ${r.confidence}) for ` +
+    `${r.request.target_country} · ${r.request.business_type}, ` +
+    `budget ${r.request.budget} ${r.request.currency}.\n` +
+    `Executive summary: ${r.executive_summary}\n` +
+    `Platform interest: ${platforms}.\n` +
+    `Budget split: ${budget}.\n` +
+    `Risks: ${risks}.`
+  );
+}
+
 function applyUsage(report: Report) {
   store.profile.usage.total_tokens_in += report.cost.total_tokens_in;
   store.profile.usage.total_tokens_out += report.cost.total_tokens_out;
@@ -256,11 +275,7 @@ export async function sendMessage(
   // backend can accumulate details across turns and answer follow-up questions.
   const history = conv.messages.slice(-10).map((m) => ({
     role: m.role,
-    text:
-      m.kind === "report" && m.report
-        ? `[report] ${m.report.verdict} for ${m.report.request.target_country} · ` +
-          `${m.report.request.business_type} (${m.report.request.budget} ${m.report.request.currency})`
-        : m.text ?? "",
+    text: m.kind === "report" && m.report ? summarizeReport(m.report) : m.text ?? "",
   }));
 
   // Append the user message + set the title from the first message.

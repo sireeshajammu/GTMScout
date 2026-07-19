@@ -72,6 +72,7 @@ export interface Report {
   budget_allocation: BudgetItem[];
   risks: Risk[];
   next_steps: string[];
+  research_findings?: string[];
   citations: Citation[];
   cost: Cost;
   verification: Verification;

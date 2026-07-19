@@ -263,6 +263,27 @@ export function BriefCard({ report }: { report: Report }) {
           </AccordionContent>
         </AccordionItem>
 
+        {report.research_findings && report.research_findings.length > 0 && (
+          <AccordionItem value="research">
+            <AccordionTrigger className="text-sm font-semibold">
+              Live research ({report.research_findings.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <ul className="space-y-2">
+                {report.research_findings.map((f, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm">
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+                    <span>{f}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Sourced live from the web — see Citations for links.
+              </p>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
         <AccordionItem value="citations">
           <AccordionTrigger className="text-sm font-semibold">Citations</AccordionTrigger>
           <AccordionContent>

@@ -52,25 +52,35 @@ def get_country_code(country_name: str) -> Optional[str]:
 
 
 def _fetch_indicator(country_code: str, indicator_code: str) -> Dict:
-    """Fetch the most recent non-null value for one indicator."""
+    """Fetch the most recent non-null value for one indicator, with one retry."""
     url = (
         f"{WORLDBANK_API}/{country_code}/indicator/{indicator_code}"
         f"?format=json&per_page=5&mrnev=1"
     )
-    resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    result = resp.json()
-    if len(result) > 1 and result[1]:
-        for row in result[1]:
-            if row.get("value") is not None:
-                return {"value": float(row["value"]), "year": row.get("date"), "source": "World Bank"}
-    return {"value": None, "source": "World Bank", "note": "No data available"}
+    last_err = None
+    for attempt in range(2):  # one retry — WB can be transiently slow
+        try:
+            resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": "GTMScout/1.0"})
+            resp.raise_for_status()
+            result = resp.json()
+            if len(result) > 1 and result[1]:
+                for row in result[1]:
+                    if row.get("value") is not None:
+                        return {"value": float(row["value"]), "year": row.get("date"), "source": "World Bank"}
+            return {"value": None, "source": "World Bank", "note": "No data available"}
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    return {"value": None, "error": str(last_err)}
 
 
 def get_country_data(country_name: str) -> Dict:
     """
     Fetch economic and demographic data for a country from the World Bank API.
-    Falls back to curated figures if the live API is unavailable.
+
+    Resilient per-indicator: each indicator is fetched independently, and only the
+    ones that fail fall back to curated values (previously a single failed request
+    dumped ALL indicators to fallback — that was why production kept showing cached
+    data). `is_fallback` is True only if at least one indicator used a fallback value.
     """
     country_code = get_country_code(country_name)
     if not country_code:
@@ -87,31 +97,36 @@ def get_country_data(country_name: str) -> Dict:
         "data": {},
         "is_fallback": False,
     }
+    fb = FALLBACK.get(country_code, {})
 
+    # Fetch all indicators concurrently.
+    live: Dict[str, Dict] = {}
     try:
-        # Fetch all indicators concurrently to stay well within serverless limits.
         with ThreadPoolExecutor(max_workers=4) as ex:
             futures = {
                 name: ex.submit(_fetch_indicator, country_code, code)
                 for name, code in INDICATORS.items()
             }
             for name, fut in futures.items():
-                data["data"][name] = fut.result()
-
-        # If the API returned no usable numbers, fall back.
-        if all(v.get("value") is None for v in data["data"].values()):
-            raise ValueError("empty result set")
-        return data
-
+                live[name] = fut.result()
     except Exception:
-        fb = FALLBACK.get(country_code)
-        if not fb:
-            return {
-                "success": False,
-                "error": "World Bank API unavailable and no fallback data for this country.",
-                "country": country_name,
-            }
-        data["is_fallback"] = True
-        for name, value in fb.items():
-            data["data"][name] = {"value": float(value), "year": "recent", "source": "World Bank (cached)"}
-        return data
+        live = {}
+
+    for name in INDICATORS:
+        got = live.get(name) or {}
+        if got.get("value") is not None:
+            data["data"][name] = got
+        elif name in fb:
+            data["data"][name] = {"value": float(fb[name]), "year": "recent", "source": "World Bank (cached)"}
+            data["is_fallback"] = True
+        else:
+            data["data"][name] = {"value": None, "source": "World Bank", "note": "No data available"}
+
+    # If we have no numbers at all and no fallback, report failure.
+    if all(v.get("value") is None for v in data["data"].values()):
+        return {
+            "success": False,
+            "error": "World Bank API unavailable and no fallback data for this country.",
+            "country": country_name,
+        }
+    return data

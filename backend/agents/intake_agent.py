@@ -28,8 +28,10 @@ Decide the intent:
   newest message doesn't restate them.
 - "reply": use this when the message is a greeting, OR is a follow-up question about the previous
   report (e.g. "why LinkedIn?", "what are the risks?"), OR still lacks a country or business type.
-  In these cases write a helpful, concise "reply" (you may answer follow-up questions using the
-  details already shown in the conversation).
+  In these cases write a helpful, concise "reply". When answering a follow-up about the previous
+  report, ground your answer in ITS SPECIFIC numbers from the transcript (the platform interest
+  scores, the budget split percentages, the named risks, the verdict/confidence) — do not give
+  generic advice. e.g. "Instagram leads at 100/100 and takes 45% ($6,750) of the budget because…".
 
 Return ONLY this JSON:
 {
