@@ -49,6 +49,16 @@ def _ensure_schema(conn):
                 created_at timestamptz DEFAULT now()
             );"""
         )
+        # HNSW approximate-nearest-neighbour index. vector_cosine_ops matches the `<=>`
+        # (cosine distance) operator used in search(). m / ef_construction are graph build
+        # params; query-time recall/speed is tuned via the hnsw.ef_search GUC (default 40).
+        # Created on the empty table (instant + idempotent); building it later on a large
+        # table would be slow and take a lock.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS research_chunks_embedding_hnsw "
+            "ON research_chunks USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64);"
+        )
     conn.commit()
     _schema_ready = True
 
