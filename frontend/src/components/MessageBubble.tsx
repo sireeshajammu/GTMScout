@@ -2,8 +2,7 @@ import type { Message, ProgressEvent } from "@/services/types";
 import { BriefCard } from "./BriefCard";
 import { ComparisonCard } from "./ComparisonCard";
 import { RankingCard } from "./RankingCard";
-import { AgentStepper } from "./AgentStepper";
-import { Bot, User } from "lucide-react";
+import { Bot, User, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function MessageBubble({ msg }: { msg: Message }) {
@@ -52,14 +51,17 @@ function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 }
 
-export function ThinkingMessage({ events, startedAt }: { events: ProgressEvent[]; startedAt: number }) {
+export function ThinkingMessage(_props: { events: ProgressEvent[]; startedAt: number }) {
   return (
     <div className="flex gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
         <Bot className="h-4 w-4" />
       </div>
       <div className="flex-1 max-w-2xl">
-        <AgentStepper events={events} startedAt={startedAt} />
+        <div className="flex items-center gap-2.5 rounded-xl border border-border bg-muted/20 px-4 py-3">
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          <span className="animate-pulse text-sm text-muted-foreground">Agents researching…</span>
+        </div>
       </div>
     </div>
   );

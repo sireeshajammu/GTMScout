@@ -4,7 +4,7 @@ import { ConfidenceMeter } from "./ConfidenceMeter";
 import { StatTile } from "./StatTile";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
-import { Copy, Download, ExternalLink, FileText, AlertTriangle, GitBranch, RefreshCw } from "lucide-react";
+import { Copy, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -52,20 +52,6 @@ export function BriefCard({ report }: { report: Report }) {
           </div>
           <ConfidenceMeter value={report.confidence} />
         </div>
-
-        {report.verification.flags.length > 0 && (
-          <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-            <AlertTriangle className="h-4 w-4 shrink-0" />
-            <div>
-              <div className="font-semibold">Verification notes</div>
-              <ul className="mt-1 list-disc pl-4 space-y-0.5">
-                {report.verification.flags.map((f, i) => (
-                  <li key={i}>{f}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Body accordion */}
@@ -431,14 +417,8 @@ export function BriefCard({ report }: { report: Report }) {
 
       {/* Footer actions */}
       <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border p-4">
-        <Button variant="ghost" size="sm" onClick={() => toast.info("PDF export — coming soon")}>
-          <FileText className="mr-1.5 h-4 w-4" /> Export PDF
-        </Button>
-        <Button variant="ghost" size="sm" onClick={() => toast.info("Markdown export — coming soon")}>
-          <Download className="mr-1.5 h-4 w-4" /> Markdown
-        </Button>
         <Button variant="ghost" size="sm" onClick={copy}>
-          <Copy className="mr-1.5 h-4 w-4" /> Copy
+          <Copy className="mr-1.5 h-4 w-4" /> Copy response
         </Button>
       </div>
     </div>

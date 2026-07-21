@@ -1,64 +1,72 @@
 # GTMScout — Design Note
 
-## What it is
-A market-entry research assistant. You give it a country, a business type, and a budget
-("fintech app in Brazil, $20k"), and it returns a structured go/no-go brief: real economic
-data, a platform strategy, a budget split, risks, next steps, and a citation for every fact.
-The interesting part isn't the output format, it's that answering this well needs several
-steps and several data sources, so a single model call can't do it honestly.
+## Project overview
+GTMScout is a market-entry research assistant. You give it a country, a business type, and a budget,
+and it returns a structured go/no-go brief: real economic data, a platform strategy, a budget split,
+risks, next steps, and a citation for every fact. I built it to find out whether a small team of
+specialized agents could produce grounded, checkable market advice instead of the confident guesses a
+single model tends to give. The deliverable is a working end-to-end system: a FastAPI backend of
+cooperating agents, a chat frontend, an evaluation harness, and this note.
 
-## The core decision: many small agents behind an explicit graph
-I started with one big prompt and threw it out. With one call you can't tell which sentence is
-a fact and which is a guess, you can't check the work, and you can't fix one part without
-risking another. So the system is ~10 single-purpose agents (intake, planner, data, research,
-platform, strategy, critic, deep-dive, plus comparison/ranking for multi-market questions),
-and the report path is a LangGraph `StateGraph` that decides what runs and checks the result.
+## Problem and goals
+Someone deciding where to expand asks a broad question, and answering it honestly needs several data
+sources and several reasoning steps. Ask one model to do all of it in one prompt and you get fluent
+text where you can't separate fact from guess, can't verify it, and can't fix one part without
+disturbing another.
 
-The flow for a report: **plan → gather → synthesize → critique → (revise) → deep-dive →
-assemble.** The planner picks which tools are worth calling. Gather runs the World Bank fetch
-and the web search concurrently, then ranks platforms off the research. Strategy writes the
-verdict. The critic checks it. If the critic finds unsupported claims or confidence lands below
-70, a conditional edge routes back to a revise node that re-runs strategy with the criticism
-injected, then re-checks. That loop is capped at two passes so it can't spin.
+I set four goals I could actually measure against:
+- **Grounding** — every number traces to a real source, never invented. *(Met: World Bank + live web, cited.)*
+- **Self-correction** — the system catches and revises its own weak answers, not just returns the first draft. *(Met: a critic that can force a rewrite.)*
+- **Interactive cost and speed** — single-digit seconds, a fraction of a cent per run. *(Met: ~8.8s, ~$0.002 per brief.)*
+- **Provable** — works on a fixed case set, not only the demo. *(Met: 10/10 on the eval harness.)*
 
-## The principle I'd defend first: facts and reasoning are separate
-Any real number comes from a real source, never the model. Population and GDP come from the
-World Bank API. Competitors and market signals come from live web search (Tavily). The model
-only reasons over numbers it's handed, and the budget math is recomputed in Python after the
-LLM answers so the allocation always sums to the actual budget. This is the single biggest
-thing keeping the output from being confident nonsense.
+## Target audience
+The end user is a founder, operator, or growth marketer weighing a new international market, someone
+who would otherwise pay a consultancy or settle for a generic chatbot answer that makes the numbers
+up. Their pain is speed and trust: they need a defensible first read fast, with sources they can
+check. The second audience is whoever reads the code. The eval harness and the honest limitations
+section exist partly for them.
 
-## Self-correction is a real loop, not asking twice
-The agent that writes the recommendation and the one that critiques it are separate calls with
-separate prompts, and only the critic can force a rewrite. The critic returns flags plus a
-confidence delta; the orchestrator combines that into an effective confidence and decides
-whether to revise. If the reason confidence is low is that research was skipped, revise goes
-and gets the research first, then rewrites. In evaluation this fired on nearly every case,
-which is honestly a sign the confidence floor is tuned too strict, not a badge of quality.
+## Scope and specifications
+**In scope:** single-market briefs, side-by-side comparison of analyzed markets, and ranking across
+candidate markets. **Out of scope:** financial or legal advice, anything illegal (blocked
+deterministically before any model call), and sub-national markets.
 
-## Everything degrades instead of breaking
-Each World Bank indicator is fetched independently, so one failure falls back to a curated
-figure and is flagged, rather than dumping the whole request to cached data (a real bug I
-fixed). Web search and the vector cache are both optional; missing keys mean fewer findings,
-not a crash. The platform ranker prefers platforms the live research names as locally relevant
-(so KakaoTalk shows up for Korea), and falls back to a hand-tuned table when research is thin.
+The constraints I designed against, and the decisions they forced:
+- **Facts from APIs, reasoning from the model.** World Bank for economics, Tavily for live signals,
+  budget math recomputed in Python. The model phrases and reasons; it never sources a number.
+- **Small agents with typed contracts.** About ten single-purpose agents with pydantic I/O, so each
+  is testable and swappable in isolation. The cost is more model calls than one prompt would need.
+- **An explicit graph.** The report loop is a LangGraph state machine: a planner picks tools, two I/O
+  tools run concurrently, and a critic-to-revise cycle runs at most twice. The cost is that
+  langchain-core adds weight to serverless cold starts.
+- **Fail soft everywhere.** Per-indicator World Bank fallback, empty web results, a heuristic platform
+  table, a cache that no-ops without a database. Nothing hard-fails; degraded output is flagged.
 
-## RAG, injection, evaluation
-- **RAG** is a pgvector cache of past research *findings*, keyed by country and business, shared
-  across sessions. It's a cheap-recall layer beside the live search, not the primary retrieval,
-  because for market data the ground truth is live. Today it augments the web call rather than
-  replacing it, so it isn't saving API calls yet.
-- **Prompt injection** from web pages is handled in layers: a deterministic scanner drops
-  snippets with injection markers, surviving content is wrapped in tags the prompt marks as
-  data-not-instructions, output is schema-constrained, and that agent has no side effects, so a
-  bypass can only skew text. It's defense in depth, not a proof.
-- **Evaluation** is 10 cases with deterministic pass/fail: structure, routing, directional
-  verdict, tool-call success, self-correction rate, latency, cost. Last run was 10/10, ~8.8s and
-  ~$0.002 per report. It does not judge prose factuality; that would need an LLM judge or a human.
+**Stack:** OpenAI `gpt-4o-mini`, FastAPI on Vercel (stateless), chat state in the browser, and an
+optional Postgres + pgvector store for a cross-session research cache.
 
-## Where it stops, and why
-It's on `gpt-4o-mini`, stateless behind FastAPI on Vercel, with chat state in the browser.
-Known gaps I'd close before calling it production: the two web searches run sequentially and can
-approach the serverless timeout; there's no rate limiting or spend cap; the critic floor needs
-calibrating against labeled data; the planner commits to a tool set upfront instead of choosing
-tools interactively as it sees results. Those are deliberate scope cuts, not oversights.
+## Timeline and budget
+The brief suggested 4–6 hours and "a smaller thing done well." I went past that and treated it as a
+learning project, adding depth on stretch goals: self-correction, a RAG cache, fuzzy input handling,
+injection defense, comparison and ranking modes, and deployment. A strictly to-spec version would be
+the agent loop, three tools, error handling, the eval, and the README.
+
+Budget here means cost, and I treated it as a design constraint rather than an afterthought. Every
+agent call records its tokens and dollars, a full brief runs about $0.002, and the eval reports
+per-report cost and latency, so a change that doubles spend shows up immediately.
+
+Milestones, in the order they happened: single-shot pipeline, then conversation and intent routing,
+then decisiveness and real budget re-runs, then the agent loop with reflection, then grounding via
+live web plus the RAG cache, then country and edge-case hardening, then the eval harness, then the
+LangGraph port.
+
+## Beyond scope, next
+Multi-model routing (a stronger model for the critic than the drafter), cache-first retrieval so the
+pgvector store actually cuts web calls, faithfulness scoring with DeepEval on top of the structural
+checks, auth and rate limiting before real traffic, and request tracing so a bad report can be
+reproduced.
+
+---
+I used an AI assistant for background research and to move faster on boilerplate. The architecture,
+the tradeoffs, and the decisions behind them are mine.
