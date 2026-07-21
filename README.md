@@ -8,7 +8,7 @@ do first. Every fact carries a citation.
 It's not one model answering a prompt. It's about ten small agents, each doing one job, run by a
 LangGraph state machine that decides what to call and checks the result before it ships.
 
-**Live app:** https://gtm-scout.vercel.app · **API health:** https://gtm-scout-api.vercel.app/api/health
+**Live app:** https://gtm-scout.vercel.app · 
 **Model:** OpenAI `gpt-4o-mini` (~$0.002 per full brief).
 
 ## How it works
@@ -117,8 +117,7 @@ These are the five calls I'd defend in a review.
 
 ## Known limitations
 
-- Streaming is faked: the "reasoning" stepper in the UI is a client-side animation; the backend
-  returns one response.
+- Streaming is absent
 - The critic is strict — it revises almost every report, which adds a call each time. Its confidence
   floor should be calibrated against labeled data.
 - Prompt-injection defense on web content is layered (a scanner, spotlighting, no side effects), not
