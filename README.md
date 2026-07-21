@@ -1,7 +1,7 @@
 # GTMScout
 
-An agentic market-entry research assistant. Tell it a country, a business type, and a budget —
-*"a fintech app in Brazil with $20k"* — and it comes back with a go/no-go call: real population and
+An agentic market-entry research assistant. Tell it a country, a business type, and a budget 
+a fintech app in Brazil with $20k and it comes back with a go/no-go call: real population and
 GDP figures, which marketing platforms to spend on, how to split the budget, the risks, and what to
 do first. Every fact carries a citation.
 
