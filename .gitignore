@@ -23,7 +23,4 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
-# Local-only (not shipped in the repo)
-Internship_Take_Home_Agentic_AI_Application_Development.pdf
-LOVABLE_PROMPT.md
-frontend/.lovable/
+

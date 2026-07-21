@@ -1,7 +1,7 @@
 """Central configuration for the GTMScout agent backend."""
 
 # --- LLM Configuration ---
-# Kept on OpenAI gpt-4o-mini (the model you integrated).
+# Kept on OpenAI gpt-4o-mini 
 MODEL = "gpt-4o-mini"
 TEMPERATURE = 0.4          # a touch lower for more grounded, consistent analysis
 MAX_TOKENS = 1200

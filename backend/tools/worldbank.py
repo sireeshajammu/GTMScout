@@ -6,11 +6,19 @@ recent figures so the pipeline never hard-fails (important on serverless).
 """
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # All ~249 countries, precomputed offline from ISO-3166 (see scripts/generate_country_codes.py).
 # Loaded once at import — a single ~19KB module, no runtime API fetch, no cold-start cost.
 from country_codes_data import COUNTRY_INDEX
+
+# Fuzzy matching for misspelled country names ("Phillipines" -> "Philippines").
+# Optional: if rapidfuzz isn't installed the resolver silently degrades to exact-only.
+try:
+    from rapidfuzz import process, fuzz
+except Exception:  # noqa: BLE001
+    process = None
+    fuzz = None
 
 WORLDBANK_API = "https://api.worldbank.org/v2/country"
 REQUEST_TIMEOUT = 10  # seconds per indicator
@@ -82,11 +90,75 @@ def is_city(country_name: str) -> Optional[str]:
     return CITY_TO_COUNTRY.get((country_name or "").lower().strip())
 
 
+# ---- Fuzzy matching (misspelled countries/cities) ----
+# Candidate keys are name-like only (len >= 4) so 2-3 letter ISO codes ("in", "irn")
+# can't be fuzzily hijacked by a typo. Built once at import.
+_FUZZY_NAMES = sorted({
+    k for k in (*COUNTRY_INDEX, *COUNTRY_ALIASES, *CITY_TO_COUNTRY) if len(k) >= 4
+})
+_FUZZY_AUTO = 90     # >= this (with a clear gap) → auto-correct silently
+_FUZZY_SUGGEST = 80  # >= this → offer a "did you mean X?" confirmation
+_FUZZY_GAP = 6       # best must beat runner-up by this to auto-accept (Iran/Iraq rail)
+
+
+def _code_for_key(key: Optional[str]) -> Optional[str]:
+    if not key:
+        return None
+    return COUNTRY_ALIASES.get(key) or COUNTRY_INDEX.get(key) or CITY_TO_COUNTRY.get(key)
+
+
+def _fuzzy_match(name: str) -> Optional[Tuple[str, str, float, bool]]:
+    """Best fuzzy candidate for a name. Returns (matched_key, iso3, score, clear_gap) or None.
+
+    `clear_gap` is True when the top match beats the runner-up by _FUZZY_GAP — OR when
+    both map to the same country (not actually ambiguous). It's False for dangerous
+    near-neighbours like Iran/Iraq or Niger/Nigeria, which must be confirmed, not guessed.
+    """
+    if not name or len(name) < 4 or process is None:
+        return None
+    results = process.extract(name, _FUZZY_NAMES, scorer=fuzz.WRatio, limit=2)
+    if not results:
+        return None
+    best_key, best_score = results[0][0], results[0][1]
+    code = _code_for_key(best_key)
+    if not code:
+        return None
+    second_score = results[1][1] if len(results) > 1 else 0
+    second_code = _code_for_key(results[1][0]) if len(results) > 1 else None
+    clear_gap = (second_code == code) or (best_score - second_score) >= _FUZZY_GAP
+    return (best_key, code, best_score, clear_gap)
+
+
+def resolve_country(country_name: str) -> Optional[Tuple[str, str]]:
+    """Resolve to (iso3_code, canonical_display_name), applying high-confidence fuzzy
+    correction. Exact hits keep the user's spelling; auto-corrected typos get the proper name."""
+    n = (country_name or "").lower().strip()
+    exact = COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n) or CITY_TO_COUNTRY.get(n)
+    if exact:
+        return (exact, (country_name or "").strip())
+    m = _fuzzy_match(n)
+    if m and m[2] >= _FUZZY_AUTO and m[3]:
+        return (m[1], m[0].title())
+    return None
+
+
+def suggest_country(country_name: str) -> Optional[Tuple[str, str]]:
+    """For a near-miss that didn't auto-resolve, return (display_name, iso3) to confirm
+    ("did you mean X?"). None if the name resolves exactly or is too far to guess."""
+    n = (country_name or "").lower().strip()
+    if COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n) or CITY_TO_COUNTRY.get(n):
+        return None  # already resolves exactly
+    m = _fuzzy_match(n)
+    if m and m[2] >= _FUZZY_SUGGEST:
+        return (m[0].title(), m[1])
+    return None
+
+
 def get_country_code(country_name: str) -> Optional[str]:
     """Resolve a country name / ISO-2 / ISO-3 / major city to a World Bank ISO-3 code.
-    Aliases first (colloquial shorthands), then the ISO-3166 index, then major cities."""
-    n = (country_name or "").lower().strip()
-    return COUNTRY_ALIASES.get(n) or COUNTRY_INDEX.get(n) or CITY_TO_COUNTRY.get(n)
+    Aliases first, then the ISO-3166 index, then major cities, then high-confidence fuzzy."""
+    r = resolve_country(country_name)
+    return r[0] if r else None
 
 
 def _fetch_indicator(country_code: str, indicator_code: str) -> Dict:

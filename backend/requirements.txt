@@ -5,3 +5,5 @@ python-dotenv==1.0.1
 requests==2.32.3
 pydantic==2.10.4
 psycopg2-binary==2.9.10
+rapidfuzz==3.10.1
+langgraph==1.2.9

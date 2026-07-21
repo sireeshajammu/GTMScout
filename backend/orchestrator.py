@@ -8,11 +8,13 @@ Routes four intents from the IntakeAgent:
 
 Assembles objects matching the frontend TypeScript types and aggregates token cost.
 """
+import operator
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from langgraph.graph import StateGraph, END
 
 from agents.intake_agent import IntakeAgent
 from agents.planner_agent import PlannerAgent
@@ -26,7 +28,7 @@ from agents.comparison_agent import ComparisonAgent
 from agents.ranking_agent import RankingAgent
 from contracts import validate_report
 from safety import is_blocked, REFUSAL
-from tools.worldbank import is_ambiguous
+from tools.worldbank import is_ambiguous, resolve_country, suggest_country
 from config import usd_cost
 
 # --- agent-loop tuning ---
@@ -38,20 +40,40 @@ MIN_BUDGET = 500
 MAX_BUDGET = 100_000_000    # $100M — above this, almost certainly a typo
 
 
-@dataclass
-class RunState:
-    """Shared state that flows through the agent loop — the real 'agent memory':
-    the plan, tool observations, accumulated evidence, and a reasoning log."""
-    request: Dict
-    plan: Dict = field(default_factory=dict)
-    obs: Dict = field(default_factory=dict)        # tool/agent observations
-    evidence: List = field(default_factory=list)   # accumulated findings
-    log: List = field(default_factory=list)        # reasoning scratchpad (node transitions)
-    agents: List = field(default_factory=list)     # for cost aggregation
-    iterations: int = 0
+class ReportState(TypedDict, total=False):
+    """LangGraph state for the report agent loop — the real 'agent memory' that flows
+    node-to-node: the plan, tool observations, accumulated evidence, and a reasoning log.
 
-    def note(self, node: str, msg: str):
-        self.log.append({"node": node, "note": msg})
+    The three accumulating channels (evidence / log / agents) use an `operator.add`
+    reducer, so each node RETURNS the items it adds and LangGraph concatenates them —
+    no in-place mutation. Everything else uses the default (replace) reducer.
+    """
+    request: Dict
+    plan: Dict
+    # accumulating channels (reducer = list concat)
+    evidence: Annotated[List, operator.add]     # findings gathered across the loop
+    log: Annotated[List, operator.add]          # reasoning scratchpad (node transitions)
+    agents: Annotated[List, operator.add]       # agent handles, for cost aggregation
+    iterations: int
+    # agent handles reused across nodes
+    data_agent: Any
+    platform_agent: Any
+    research_agent: Any
+    strategy_agent: Any
+    critic_agent: Any
+    # observations threaded between nodes
+    data_out: Dict
+    research_out: Dict
+    platform_out: Dict
+    strategy_out: Dict
+    critic_out: Dict
+    deep_out: Dict
+    # terminal output (an assistant Message)
+    result: Dict
+
+
+def _log(node: str, msg: str) -> Dict:
+    return {"node": node, "note": msg}
 
 
 def _now() -> str:
@@ -192,6 +214,18 @@ def run_research(
     if amb:
         return _clarify(intake, f"“{target}” is ambiguous — did you mean {amb}? Tell me which one.")
 
+    # Resolve / fuzzy-correct the country. High-confidence typos ("Phillipines") auto-correct;
+    # near-misses ask for confirmation; anything too far falls through to the data agent's
+    # honest "not a country" failure.
+    resolved = resolve_country(target)
+    if resolved:
+        target = resolved[1]  # canonical spelling (fixes typos in the displayed report)
+    else:
+        sugg = suggest_country(target)
+        if sugg:
+            return _clarify(intake, f"I don't recognize “{target}”. Did you mean {sugg[0]}? "
+                                    "Reply with the correct country.")
+
     business_type = (req.get("business_type") or "").strip()
     if not business_type:
         return _clarify(intake, "What type of business is this for? "
@@ -212,113 +246,171 @@ def run_research(
     return _run_report(intake, request, home_country, request["budget"], request["currency"])
 
 
-def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
-    """Single-market brief produced by a hand-rolled, graph-shaped agent loop:
+# ===========================================================================
+# The report agent loop as a LangGraph StateGraph.
+#
+#            ┌───────────────────────── revise ◄──┐  (conditional edge:
+#   plan ► gather ► [data ok?] ► synthesize ► critic  unsupported claims OR
+#             │         │ no          │ fail      │   confidence < floor)
+#             │      fail_data     fail_strategy  └► deep_dive ► assemble ► END
+#
+# Each node is a plain function (state) -> partial-state-update. Agents and the
+# OpenAI client are unchanged — LangGraph only owns the transitions/state.
+# `gather` keeps a ThreadPoolExecutor internally so the two independent I/O tools
+# (World Bank ∥ Tavily) still run CONCURRENTLY; LangGraph's sync executor would
+# otherwise run same-superstep nodes serially and lose that measured speedup.
+# ===========================================================================
 
-        plan ──► gather (parallel) ──► synthesize ──► critic ──┐
-                                          ▲                     │ conditional edge
-                                          └──── replan ◄────────┘  (unsupported claims OR confidence < floor)
-                                                                 └──► deep_dive ──► assemble
-    """
-    request = {
-        "target_country": request.get("target_country"),
-        "business_type": request.get("business_type") or "general",
-        "home_country": home_country or request.get("home_country") or "United States",
-        "budget": float(budget or request.get("budget") or 20000),
-        "currency": currency or request.get("currency") or "USD",
-    }
-    state = RunState(request=request)
-    state.agents.append(intake)
-
-    # ---- NODE: plan ----
+def _node_plan(state: ReportState) -> Dict:
+    request = state["request"]
     planner = PlannerAgent()
-    state.agents.append(planner)
-    state.plan = planner.plan(request)
-    state.note("plan", f"gather {state.plan['gather']} in parallel; synthesize {state.plan['synthesize']}. "
-                       f"{state.plan.get('reason', '')}")
+    plan = planner.plan(request)
+    return {
+        "plan": plan,
+        "agents": [planner],
+        "log": [_log("plan", f"gather {plan['gather']} in parallel; synthesize {plan['synthesize']}. "
+                             f"{plan.get('reason', '')}")],
+    }
 
-    # ---- NODE: gather (independent tools run in parallel) ----
+
+def _node_gather(state: ReportState) -> Dict:
+    request = state["request"]
+    plan = state["plan"]
     data_agent = DataAgent()
     platform_agent = PlatformAgent()
-    research_agent = ResearchAgent() if "web_research" in state.plan["gather"] else None
-    state.agents += [a for a in (data_agent, platform_agent, research_agent) if a]
+    research_agent = ResearchAgent() if "web_research" in plan.get("gather", []) else None
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    # Data and Research are independent -> run CONCURRENTLY. Platform depends on
+    # Research (it prefers platforms the web says matter locally), so it runs after.
+    with ThreadPoolExecutor(max_workers=2) as ex:
         f_data = ex.submit(data_agent.execute, request["target_country"])
-        f_plat = ex.submit(platform_agent.execute, request["target_country"], request["business_type"])
         f_res = ex.submit(research_agent.execute, request["target_country"], request["business_type"]) if research_agent else None
         data_out = f_data.result()
-        platform_out = f_plat.result()
         research_out = f_res.result() if f_res else {"findings": [], "citations": [], "brief": "", "notable_risks": []}
 
-    if not data_out.get("success"):
-        m = _text_message(
-            f"I couldn't pull reliable market data for “{request['target_country']}”. "
-            f"{data_out.get('error', '')} Try a major market (e.g. Japan, Brazil, Germany, India)."
-        )
-        m["_cost"] = _cost_block(state.agents)
-        return m
+    platform_out = platform_agent.execute(
+        request["target_country"], request["business_type"], research=research_out
+    )
     if not platform_out.get("success"):
-        platform_out = {"platform_recommendations": [], "citations": [], "brief": ""}
+        platform_out = {"platform_recommendations": [], "citations": [], "brief": "", "success": False}
 
-    state.obs.update(data=data_out, platform=platform_out, research=research_out)
-    state.evidence += research_out.get("findings", [])
     _rag = research_out.get("cached_used", 0)
-    state.note("gather", f"macro data ({'cached' if data_out.get('is_fallback') else 'live'}), "
-                         f"{len(platform_out.get('platform_recommendations', []))} platforms, "
-                         f"{len(research_out.get('findings', []))} web findings"
-                         + (f" (+{_rag} from RAG cache)" if _rag else "") + ".")
+    note = (f"macro data ({'cached' if data_out.get('is_fallback') else 'live'}), "
+            f"{len(platform_out.get('platform_recommendations', []))} platforms"
+            + (" (web-grounded)" if platform_out.get("research_driven") else " (heuristic)") + ", "
+            f"{len(research_out.get('findings', []))} web findings"
+            + (f" (+{_rag} from RAG cache)" if _rag else "") + ".")
+    return {
+        "data_agent": data_agent, "platform_agent": platform_agent, "research_agent": research_agent,
+        "data_out": data_out, "research_out": research_out, "platform_out": platform_out,
+        "agents": [a for a in (data_agent, platform_agent, research_agent) if a],
+        "evidence": research_out.get("findings", []),
+        "log": [_log("gather", note)],
+    }
 
-    md = data_out["market_data"]
-    platforms = platform_out.get("platform_recommendations", [])
-    is_fallback = data_out.get("is_fallback", False)
 
+def _node_fail_data(state: ReportState) -> Dict:
+    request = state["request"]
+    out = state["data_out"]
+    m = _text_message(
+        f"I couldn't pull reliable market data for “{request['target_country']}”. "
+        f"{out.get('error', '')} Try a major market (e.g. Japan, Brazil, Germany, India)."
+    )
+    m["_cost"] = _cost_block(state["agents"])
+    return {"result": m}
+
+
+def _node_synthesize(state: ReportState) -> Dict:
+    request = state["request"]
+    md = state["data_out"]["market_data"]
+    platforms = state["platform_out"].get("platform_recommendations", [])
     strategy_agent = StrategyAgent()
     critic_agent = CriticAgent()
-    state.agents += [strategy_agent, critic_agent]
+    strategy_out = strategy_agent.execute(request, md, platforms, research=state["research_out"])
+    return {
+        "strategy_agent": strategy_agent, "critic_agent": critic_agent,
+        "strategy_out": strategy_out, "agents": [strategy_agent, critic_agent], "iterations": 1,
+    }
 
-    # ---- NODE: synthesize + observe (critic) with a conditional replan edge ----
-    strategy_out = strategy_agent.execute(request, md, platforms, research=research_out)
-    if not strategy_out.get("success"):
-        m = _text_message("The strategy step failed to produce a valid brief. Please try again.")
-        m["_cost"] = _cost_block(state.agents)
-        return m
-    critic_out = critic_agent.execute(request, md, strategy_out, is_fallback)
-    state.iterations = 1
-    state.note("critic", f"verdict {strategy_out['verdict']} @ {strategy_out['confidence']}; "
-                         f"{len(_actionable_flags(critic_out))} actionable flag(s), "
-                         f"confidence_delta {critic_out.get('confidence_delta', 0)}.")
 
-    while state.iterations < MAX_STRATEGY_ATTEMPTS and _needs_revision(critic_out, strategy_out):
-        flags = _actionable_flags(critic_out)
-        # observe -> replan: if the weakness is thin evidence, pull more before retrying.
-        low_conf = _effective_confidence(strategy_out, critic_out) < CONFIDENCE_FLOOR
-        if low_conf and research_agent is None:
-            research_agent = ResearchAgent()
-            state.agents.append(research_agent)
-            research_out = research_agent.execute(request["target_country"], request["business_type"])
-            state.obs["research"] = research_out
-            state.evidence += research_out.get("findings", [])
-            state.note("replan", "confidence low and web research was skipped — gathering live evidence, then revising.")
-        else:
-            state.note("replan", f"revising strategy to fix {len(flags)} flagged issue(s).")
+def _node_fail_strategy(state: ReportState) -> Dict:
+    m = _text_message("The strategy step failed to produce a valid brief. Please try again.")
+    m["_cost"] = _cost_block(state["agents"])
+    return {"result": m}
 
-        strategy_out = strategy_agent.execute(request, md, platforms, research=research_out, criticism=flags)
-        critic_out = critic_agent.execute(request, md, strategy_out, is_fallback)
-        state.iterations += 1
-        state.note("critic", f"after revision: verdict {strategy_out['verdict']} @ {strategy_out['confidence']}, "
-                             f"{len(_actionable_flags(critic_out))} remaining flag(s).")
 
-    # ---- NODE: deep_dive (optional per plan) ----
+def _node_critic(state: ReportState) -> Dict:
+    request = state["request"]
+    md = state["data_out"]["market_data"]
+    is_fallback = state["data_out"].get("is_fallback", False)
+    strategy_out = state["strategy_out"]
+    critic_out = state["critic_agent"].execute(request, md, strategy_out, is_fallback)
+    prefix = "after revision: " if state.get("iterations", 1) > 1 else ""
+    note = (f"{prefix}verdict {strategy_out['verdict']} @ {strategy_out['confidence']}; "
+            f"{len(_actionable_flags(critic_out))} actionable flag(s), "
+            f"confidence_delta {critic_out.get('confidence_delta', 0)}.")
+    return {"critic_out": critic_out, "log": [_log("critic", note)]}
+
+
+def _node_revise(state: ReportState) -> Dict:
+    request = state["request"]
+    md = state["data_out"]["market_data"]
+    flags = _actionable_flags(state["critic_out"])
+    research_out = state["research_out"]
+    platform_out = state["platform_out"]
+    updates: Dict = {}
+    # observe -> replan: if the weakness is thin evidence, pull more before retrying.
+    low_conf = _effective_confidence(state["strategy_out"], state["critic_out"]) < CONFIDENCE_FLOOR
+    if low_conf and state.get("research_agent") is None:
+        research_agent = ResearchAgent()
+        research_out = research_agent.execute(request["target_country"], request["business_type"])
+        # Now that we have live research, re-derive platforms so they're web-grounded too.
+        platform_out = state["platform_agent"].execute(
+            request["target_country"], request["business_type"], research=research_out
+        )
+        updates.update({
+            "research_agent": research_agent, "research_out": research_out, "platform_out": platform_out,
+            "agents": [research_agent], "evidence": research_out.get("findings", []),
+            "log": [_log("replan", "confidence low and web research was skipped — gathering live evidence "
+                                   "(and re-grounding platforms), then revising.")],
+        })
+    else:
+        updates["log"] = [_log("replan", f"revising strategy to fix {len(flags)} flagged issue(s).")]
+
+    platforms = platform_out.get("platform_recommendations", [])
+    strategy_out = state["strategy_agent"].execute(request, md, platforms, research=research_out, criticism=flags)
+    updates["strategy_out"] = strategy_out
+    updates["iterations"] = state.get("iterations", 1) + 1
+    return updates
+
+
+def _node_deep_dive(state: ReportState) -> Dict:
+    request = state["request"]
+    md = state["data_out"]["market_data"]
+    platforms = state["platform_out"].get("platform_recommendations", [])
     deep_out = {"competitors": [], "unit_economics": [], "regulatory": [], "gtm_timeline": []}
-    if "deep_dive" in state.plan["synthesize"]:
+    updates: Dict = {}
+    if "deep_dive" in state["plan"].get("synthesize", []):
         deepdive_agent = DeepDiveAgent()
-        state.agents.append(deepdive_agent)
-        deep_out = deepdive_agent.execute(request, md, platforms, research=research_out)
-        state.note("deep_dive", f"{len(deep_out.get('competitors', []))} competitors, "
-                                f"{len(deep_out.get('gtm_timeline', []))} GTM phases.")
+        deep_out = deepdive_agent.execute(request, md, platforms, research=state["research_out"])
+        updates["agents"] = [deepdive_agent]
+        updates["log"] = [_log("deep_dive", f"{len(deep_out.get('competitors', []))} competitors, "
+                                            f"{len(deep_out.get('gtm_timeline', []))} GTM phases.")]
+    updates["deep_out"] = deep_out
+    return updates
 
-    # ---- NODE: assemble ----
+
+def _node_assemble(state: ReportState) -> Dict:
+    request = state["request"]
+    data_out = state["data_out"]
+    platform_out = state["platform_out"]
+    research_out = state["research_out"]
+    strategy_out = state["strategy_out"]
+    critic_out = state["critic_out"]
+    deep_out = state["deep_out"]
+    md = data_out["market_data"]
+    platforms = platform_out.get("platform_recommendations", [])
+
     confidence = _effective_confidence(strategy_out, critic_out)
     raw_citations = (
         data_out.get("citations", []) + platform_out.get("citations", []) + research_out.get("citations", [])
@@ -327,7 +419,6 @@ def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
         {"id": i, "source": c.get("source", ""), "detail": c.get("detail", ""), "url": c.get("url")}
         for i, c in enumerate(raw_citations, start=1)
     ]
-
     report = {
         "id": _uid("rep"),
         "request": request,
@@ -345,11 +436,11 @@ def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
         "gtm_timeline": deep_out.get("gtm_timeline", []),
         "research_findings": research_out.get("findings", []),
         "citations": citations,
-        "cost": _cost_block(state.agents),
+        "cost": _cost_block(state["agents"]),
         "verification": critic_out["verification"],
-        "plan": state.plan,
-        "reasoning_log": state.log,
-        "iterations": state.iterations,
+        "plan": state["plan"],
+        "reasoning_log": state["log"],
+        "iterations": state.get("iterations", 1),
         "agent_briefs": {
             "data": data_out.get("brief", ""),
             "platform": platform_out.get("brief", ""),
@@ -363,7 +454,68 @@ def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
         validate_report(report)
     except Exception as e:  # noqa: BLE001
         print(f"WARN: report failed contract validation: {e}")
-    return _report_message(report)
+    return {"result": _report_message(report)}
+
+
+# ---- conditional edges ----
+def _after_gather(state: ReportState) -> str:
+    return "synthesize" if state["data_out"].get("success") else "fail_data"
+
+
+def _after_synthesize(state: ReportState) -> str:
+    return "critic" if state["strategy_out"].get("success") else "fail_strategy"
+
+
+def _after_critic(state: ReportState) -> str:
+    if state.get("iterations", 1) < MAX_STRATEGY_ATTEMPTS and _needs_revision(state["critic_out"], state["strategy_out"]):
+        return "revise"
+    return "deep_dive"
+
+
+def _build_report_graph():
+    g = StateGraph(ReportState)
+    for name, fn in [
+        ("plan", _node_plan), ("gather", _node_gather), ("fail_data", _node_fail_data),
+        ("synthesize", _node_synthesize), ("fail_strategy", _node_fail_strategy),
+        ("critic", _node_critic), ("revise", _node_revise),
+        ("deep_dive", _node_deep_dive), ("assemble", _node_assemble),
+    ]:
+        g.add_node(name, fn)
+
+    g.set_entry_point("plan")
+    g.add_edge("plan", "gather")
+    g.add_conditional_edges("gather", _after_gather, {"synthesize": "synthesize", "fail_data": "fail_data"})
+    g.add_conditional_edges("synthesize", _after_synthesize, {"critic": "critic", "fail_strategy": "fail_strategy"})
+    g.add_conditional_edges("critic", _after_critic, {"revise": "revise", "deep_dive": "deep_dive"})
+    g.add_edge("revise", "critic")            # reflection cycle
+    g.add_edge("deep_dive", "assemble")
+    g.add_edge("assemble", END)
+    g.add_edge("fail_data", END)
+    g.add_edge("fail_strategy", END)
+    return g.compile()
+
+
+# Compiled once at import (no agent calls happen until .invoke()).
+_REPORT_GRAPH = _build_report_graph()
+
+
+def _run_report(intake, request: Dict, home_country, budget, currency) -> Dict:
+    """Single-market brief produced by a LangGraph agent loop (see _build_report_graph)."""
+    request = {
+        "target_country": request.get("target_country"),
+        "business_type": request.get("business_type") or "general",
+        "home_country": home_country or request.get("home_country") or "United States",
+        "budget": float(budget or request.get("budget") or 20000),
+        "currency": currency or request.get("currency") or "USD",
+    }
+    initial: ReportState = {
+        "request": request,
+        "agents": [intake],  # seed cost aggregation with the intake agent
+        "evidence": [], "log": [], "iterations": 0,
+        "research_out": {"findings": [], "citations": [], "brief": "", "notable_risks": []},
+    }
+    final = _REPORT_GRAPH.invoke(initial)
+    return final["result"]
 
 
 def _effective_confidence(strategy_out: Dict, critic_out: Dict) -> int:

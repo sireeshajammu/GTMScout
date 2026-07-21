@@ -1,14 +1,27 @@
 """Platform interest tool (serverless-friendly).
 
-Replaces the pytrends/pandas dependency on the deployed path. It returns a
-relative interest score (0-100) per social/marketing platform, weighted by the
-business category. Scores are a hand-tuned heuristic (not learned) informed by
-public platform-usage and ad-spend patterns; the LLM PlatformAgent reasons on top.
+Returns a relative interest score (0-100) per social/marketing platform, weighted
+by business category. Scores are a hand-tuned heuristic (not learned) informed by
+public platform-usage and ad-spend patterns.
+
+ROLE: this is now the BASELINE/FALLBACK. When live web research is available, the
+PlatformAgent prefers platforms the research names as locally relevant (incl. ones
+this table can't know — KakaoTalk, Naver, VK). This heuristic seeds a sensible
+global floor and is the sole source only when research is off/thin. See
+agents/platform_agent.py.
 
 This deliberately replaced a pytrends-based tool, which pulled in pandas (heavy
 serverless cold starts) and rate-limited constantly.
 """
+import re
 from typing import Dict, List
+
+# Fuzzy matching for misspelled business types ("fintch" -> fintech). Optional dependency.
+try:
+    from rapidfuzz import process, fuzz
+except Exception:  # noqa: BLE001
+    process = None
+    fuzz = None
 
 # Base relative interest per platform (rough, generic baseline, 0-100).
 _BASE = {
@@ -41,26 +54,37 @@ _COUNTRY_NUDGES = {
 }
 
 
+# Keyword -> category anchors, reused for exact synonym hits and fuzzy fallback.
+_BUSINESS_ANCHORS = {
+    "saas": "b2b saas", "software": "b2b saas", "b2b": "b2b saas", "enterprise": "b2b saas",
+    "app": "consumer app", "mobile": "consumer app",
+    "shop": "e-commerce", "store": "e-commerce", "commerce": "e-commerce",
+    "ecommerce": "e-commerce", "retail": "e-commerce", "dtc": "e-commerce", "d2c": "e-commerce",
+    "fashion": "fast fashion", "apparel": "fast fashion", "clothing": "fast fashion",
+    "fintech": "fintech", "finance": "fintech", "banking": "fintech", "payments": "fintech",
+    "food": "food & beverage", "restaurant": "food & beverage",
+    "beverage": "food & beverage", "drink": "food & beverage",
+    "game": "gaming", "gaming": "gaming",
+    "skincare": "skincare", "beauty": "skincare", "cosmetic": "skincare", "cosmetics": "skincare",
+}
+_ANCHOR_KEYS = list(_BUSINESS_ANCHORS.keys())
+
+
 def _match_category(business_type: str) -> str:
     bt = (business_type or "").lower()
     for key in _CATEGORY_WEIGHTS:
         if key != "general" and key in bt:
             return key
-    # loose synonyms
-    if any(w in bt for w in ["saas", "software", "b2b", "enterprise"]):
-        return "b2b saas"
-    if any(w in bt for w in ["app", "mobile"]):
-        return "consumer app"
-    if any(w in bt for w in ["shop", "store", "commerce", "retail", "dtc", "d2c"]):
-        return "e-commerce"
-    if any(w in bt for w in ["fashion", "apparel", "clothing"]):
-        return "fast fashion"
-    if any(w in bt for w in ["food", "restaurant", "beverage", "drink"]):
-        return "food & beverage"
-    if any(w in bt for w in ["game", "gaming"]):
-        return "gaming"
-    if any(w in bt for w in ["skincare", "beauty", "cosmetic"]):
-        return "skincare"
+    # exact synonym hit
+    for anchor, category in _BUSINESS_ANCHORS.items():
+        if anchor in bt:
+            return category
+    # fuzzy fallback for misspellings ("fintch", "gamng", "skincre")
+    if process is not None:
+        for word in re.findall(r"[a-z]{4,}", bt):
+            match = process.extractOne(word, _ANCHOR_KEYS, scorer=fuzz.ratio)
+            if match and match[1] >= 82:
+                return _BUSINESS_ANCHORS[match[0]]
     return "general"
 
 
