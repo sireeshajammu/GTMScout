@@ -14,7 +14,8 @@ class CriticAgent(Agent):
 plus the verified data it was built from. Your job is to catch problems, not to praise.
 
 Check for:
-- claims or numbers in the summary/risks that are NOT supported by the provided data,
+- claims or numbers in the summary/risks that are NOT supported by the market data OR the
+  research findings provided below (a claim consistent with either is supported — do not flag it),
 - a verdict that doesn't match the data (e.g. "GO" despite very low internet penetration),
 - a "GO"/"CAUTION" verdict for a business that is ILLEGAL in the target country (that must be "NOT YET"),
 - budget allocation that ignores the top platforms,
@@ -28,9 +29,25 @@ Return ONLY JSON:
 }"""
         super().__init__(name="CriticAgent", system_prompt=system_prompt)
 
-    def execute(self, request: Dict, market_data: Dict, strategy: Dict, is_fallback: bool) -> Dict:
+    def execute(self, request: Dict, market_data: Dict, strategy: Dict, is_fallback: bool,
+                platform_recs: List[Dict] = None, research: Dict = None) -> Dict:
+        platform_recs = platform_recs or []
+        findings = (research or {}).get("findings", [])
+        platforms_block = "\n".join(
+            f"{p.get('rank', '?')}. {p.get('platform')} ({p.get('interest_score')}/100)"
+            for p in platform_recs[:6]
+        ) or "(none provided)"
+        findings_block = "\n".join(f"- {f}" for f in findings) or "(no live research this run)"
+
         prompt = f"""Request: {request}
 Market data (is_cached_fallback={is_fallback}): {market_data}
+
+Ranked platforms the budget should allocate across:
+{platforms_block}
+
+Live research findings the summary/risks may draw on (claims consistent with these are supported):
+{findings_block}
+
 Verdict: {strategy.get('verdict')} (confidence {strategy.get('confidence')})
 Executive summary: {strategy.get('executive_summary')}
 Budget allocation: {strategy.get('budget_allocation')}

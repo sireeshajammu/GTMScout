@@ -98,6 +98,27 @@ def test_fuzzy_business_matching():
     print("fuzzy business matching OK")
 
 
+def test_worldbank_forced_failure_recovery():
+    """The brief explicitly wants failure handling shown. Force every World Bank
+    indicator to fail and assert the tool recovers (cached fallback + flag) for a
+    covered country, and fails honestly for one with no fallback."""
+    import tools.worldbank as wb
+    original = wb._fetch_indicator
+    wb._fetch_indicator = lambda code, ind: {"value": None, "error": "simulated WB outage"}
+    try:
+        covered = wb.get_country_data("Japan")        # JPN has a fallback entry
+        uncovered = wb.get_country_data("Ecuador")    # ECU has none
+    finally:
+        wb._fetch_indicator = original
+
+    assert covered["success"], "covered country must recover via fallback"
+    assert covered["is_fallback"], "fallback usage must be flagged"
+    assert covered["data"]["population"]["value"] == float(wb.FALLBACK["JPN"]["population"])
+    assert "cached" in covered["data"]["population"]["source"].lower()
+    assert not uncovered["success"], "no live data + no fallback must fail honestly, not fabricate"
+    print("world bank forced-failure recovery OK")
+
+
 def test_budget_validation():
     assert _budget_issue(5) and "at least" in _budget_issue(5)
     assert _budget_issue(MIN_BUDGET - 1) is not None
@@ -114,5 +135,6 @@ if __name__ == "__main__":
     test_ambiguity_and_cities()
     test_fuzzy_country_matching()
     test_fuzzy_business_matching()
+    test_worldbank_forced_failure_recovery()
     test_budget_validation()
     print("\nALL UNIT TESTS PASSED")

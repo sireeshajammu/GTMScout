@@ -10,9 +10,15 @@ from config import (
     MAX_TOKENS,
     MAX_RETRIES,
     RETRY_DELAY,
+    AGENT_TIMEOUT,
     TRACK_TOKENS,
     usd_cost,
 )
+
+# Error substrings we treat as transient and worth retrying (rate limits, timeouts,
+# 5xx, connection drops, provider overload). Client 4xx errors are NOT retried.
+_TRANSIENT = ("429", "timeout", "timed out", "500", "502", "503", "504",
+              "connection", "rate limit", "overloaded", "temporarily unavailable")
 
 load_dotenv()
 
@@ -26,7 +32,7 @@ class Agent:
     def __init__(self, name: str, system_prompt: str):
         self.name = name
         self.system_prompt = system_prompt
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=AGENT_TIMEOUT)
         self.model = MODEL
         self.token_count = {"input": 0, "output": 0}
         self.call_history = []
@@ -94,8 +100,8 @@ class Agent:
 
             except Exception as e:
                 error_msg = str(e)
-                # Retry on transient / rate-limit errors
-                if ("429" in error_msg or "timeout" in error_msg.lower()) and attempt < MAX_RETRIES - 1:
+                # Retry on transient errors (rate limits, timeouts, 5xx, connection, overload)
+                if any(m in error_msg.lower() for m in _TRANSIENT) and attempt < MAX_RETRIES - 1:
                     continue
 
                 self.call_history.append(
@@ -140,10 +146,22 @@ class Agent:
         if not result.get("success"):
             return result
         try:
-            data = json.loads(result["content"])
+            return {"success": True, "data": json.loads(result["content"]), "tokens": result["tokens"]}
+        except json.JSONDecodeError:
+            pass  # one corrective retry below
+
+        retry = self.call_llm(
+            [{"role": "user", "content": user_content + "\n\nReturn ONLY a valid JSON object, no prose."}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=True,
+        )
+        if not retry.get("success"):
+            return retry
+        try:
+            return {"success": True, "data": json.loads(retry["content"]), "tokens": retry["tokens"]}
         except json.JSONDecodeError as e:
-            return {"success": False, "error": f"Model returned invalid JSON: {e}"}
-        return {"success": True, "data": data, "tokens": result["tokens"]}
+            return {"success": False, "error": f"Model returned invalid JSON after retry: {e}"}
 
     def execute(self, input_data: Dict) -> Dict:
         raise NotImplementedError("Subclasses must implement execute()")

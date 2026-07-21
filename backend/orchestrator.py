@@ -344,7 +344,10 @@ def _node_critic(state: ReportState) -> Dict:
     md = state["data_out"]["market_data"]
     is_fallback = state["data_out"].get("is_fallback", False)
     strategy_out = state["strategy_out"]
-    critic_out = state["critic_agent"].execute(request, md, strategy_out, is_fallback)
+    platforms = state["platform_out"].get("platform_recommendations", [])
+    critic_out = state["critic_agent"].execute(
+        request, md, strategy_out, is_fallback, platforms, state["research_out"]
+    )
     prefix = "after revision: " if state.get("iterations", 1) > 1 else ""
     note = (f"{prefix}verdict {strategy_out['verdict']} @ {strategy_out['confidence']}; "
             f"{len(_actionable_flags(critic_out))} actionable flag(s), "
